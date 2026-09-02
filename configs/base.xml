@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <project_root type="path">.</project_root>
+  <runs_root type="path">runs</runs_root>
+  <device type="str">auto</device>
+  <seed type="int">20260831</seed>
+  <deterministic type="bool">true</deterministic>
+  <training>
+    <epochs type="int">120</epochs>
+    <batch_size type="int">4</batch_size>
+    <gradient_accumulation_steps type="int">1</gradient_accumulation_steps>
+    <num_workers type="int">0</num_workers>
+    <persistent_workers type="bool">false</persistent_workers>
+    <amp type="bool">true</amp>
+    <grad_clip_norm type="float">1.0</grad_clip_norm>
+    <early_stop_patience type="int">25</early_stop_patience>
+    <best_metric type="str">event_hierarchical_composite_mae</best_metric>
+  </training>
+  <optimizer>
+    <name type="str">adamw</name>
+    <learning_rate type="float">0.0003</learning_rate>
+    <weight_decay type="float">0.0001</weight_decay>
+  </optimizer>
+  <scheduler>
+    <name type="str">cosine_with_warmup</name>
+    <warmup_epochs type="int">5</warmup_epochs>
+    <minimum_learning_rate type="float">0.000001</minimum_learning_rate>
+  </scheduler>
+  <logging>
+    <csv type="bool">true</csv>
+    <tensorboard type="bool">true</tensorboard>
+    <log_every_steps type="int">10</log_every_steps>
+  </logging>
+  <checkpoint>
+    <save_last type="bool">true</save_last>
+    <save_best type="bool">true</save_best>
+    <strict_fingerprint type="bool">true</strict_fingerprint>
+  </checkpoint>
+  <inference>
+    <nodata type="float">-9999.0</nodata>
+    <save_geotiff type="bool">true</save_geotiff>
+    <save_visualization type="bool">true</save_visualization>
+  </inference>
+</config>

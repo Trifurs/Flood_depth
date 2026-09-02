@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <!-- Reuse the immutable dataset, train-only depth bins, and pixel metrics. -->
+  <include path="../pa_hydrokan/subset150_hydrov12_frozen.xml" />
+  <run_name type="str">subset150_geometry_shared_predicted_extent</run_name>
+  <geometry>
+    <!-- All three methods reuse one frozen, label-independent inference product. -->
+    <extent_source type="str">ai4g_mobilenet_v2_unet_iou_frozen_prediction</extent_source>
+    <terrain_source type="str">elevation_m_DSM_and_slope_deg</terrain_source>
+    <parameter_policy type="str">source_defaults_plus_declared_contract_adaptations_frozen_before_test</parameter_policy>
+    <methods type="list" item_type="str">
+      <item>fwdet_v21_dsm_extent</item>
+      <item>ricorde_local_hand_dsm_extent</item>
+      <item>flexth_method_a_dsm_extent</item>
+    </methods>
+    <parameters>
+      <fwdet_v21_dsm_extent>
+        <boundary_smoothing_iterations type="int">10</boundary_smoothing_iterations>
+        <boundary_smoothing_window type="int">5</boundary_smoothing_window>
+        <minimum_boundary_slope_percent type="float">0.5</minimum_boundary_slope_percent>
+        <depth_filter_window type="int">3</depth_filter_window>
+      </fwdet_v21_dsm_extent>
+      <ricorde_local_hand_dsm_extent>
+        <!-- Local replacement for unavailable hydrologic drainage/PWB inputs. -->
+        <pseudo_drainage_quantile type="float">0.05</pseudo_drainage_quantile>
+        <lower_hand_quantile type="float">0.10</lower_hand_quantile>
+        <upper_hand_quantile type="float">0.90</upper_hand_quantile>
+        <lower_hand_floor_m type="float">0.50</lower_hand_floor_m>
+        <upper_hand_cap_m type="float">7.0</upper_hand_cap_m>
+        <idw_neighbours type="int">5</idw_neighbours>
+        <idw_power type="float">2.0</idw_power>
+        <initial_smoothing_window type="int">7</initial_smoothing_window>
+        <maximum_hand_grade type="float">0.10</maximum_hand_grade>
+        <smoothing_resolution_factor type="float">3.0</smoothing_resolution_factor>
+        <maximum_smoothing_iterations type="int">5</maximum_smoothing_iterations>
+        <hand_precision_m type="float">0.10</hand_precision_m>
+      </ricorde_local_hand_dsm_extent>
+      <flexth_method_a_dsm_extent>
+        <slope_ratio_threshold type="float">0.05</slope_ratio_threshold>
+        <gap_close_area_km2 type="float">0.05</gap_close_area_km2>
+        <morphology_closing_iterations type="int">2</morphology_closing_iterations>
+        <minimum_boundary_pixels type="int">100</minimum_boundary_pixels>
+        <inner_elevation_quantile type="float">0.98</inner_elevation_quantile>
+        <idw_neighbours type="int">100</idw_neighbours>
+        <idw_power type="float">2.0</idw_power>
+        <minimum_depth_m type="float">0.10</minimum_depth_m>
+      </flexth_method_a_dsm_extent>
+    </parameters>
+  </geometry>
+</config>

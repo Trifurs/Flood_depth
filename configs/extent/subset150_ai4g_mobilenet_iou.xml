@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="../base.xml" />
+  <include path="../datasets/flooddepth_subset150.xml" />
+  <run_name type="str">subset150_ai4g_mobilenet_iou_extent</run_name>
+  <extent_model>
+    <name type="str">ai4g_mobilenet_v2_unet_iou</name>
+    <paper type="str">Misra_et_al_Nature_Communications_2025</paper>
+    <decoder_channels type="list" item_type="int">
+      <item>256</item><item>128</item><item>64</item><item>32</item><item>16</item>
+    </decoder_channels>
+    <vv_water_threshold_db type="float">-17.5</vv_water_threshold_db>
+    <vh_water_threshold_db type="float">-22.5</vh_water_threshold_db>
+    <minimum_drop_db type="float">5.0</minimum_drop_db>
+    <vv_valid_floor_db type="float">-30.0</vv_valid_floor_db>
+    <vh_valid_floor_db type="float">-32.5</vh_valid_floor_db>
+    <probability_threshold type="float">0.5</probability_threshold>
+    <buffer_pixels type="int">4</buffer_pixels>
+  </extent_model>
+  <training>
+    <epochs type="int">80</epochs>
+    <batch_size type="int">8</batch_size>
+    <gradient_accumulation_steps type="int">1</gradient_accumulation_steps>
+    <num_workers type="int">0</num_workers>
+    <persistent_workers type="bool">false</persistent_workers>
+    <amp type="bool">true</amp>
+    <grad_clip_norm type="float">1.0</grad_clip_norm>
+    <early_stop_patience type="int">20</early_stop_patience>
+    <best_metric type="str">raw_iou</best_metric>
+  </training>
+  <optimizer>
+    <name type="str">adamw</name>
+    <learning_rate type="float">0.0003</learning_rate>
+    <weight_decay type="float">0.0001</weight_decay>
+  </optimizer>
+  <scheduler>
+    <name type="str">cosine_with_warmup</name>
+    <warmup_epochs type="int">5</warmup_epochs>
+    <minimum_learning_rate type="float">0.000001</minimum_learning_rate>
+  </scheduler>
+</config>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset150_dlsim_common.xml" />
+  <run_name type="str">compare_dlsim_linknet_subset150_pixel_first</run_name>
+  <model>
+    <name type="str">dlsim_linknet_adapted</name>
+  </model>
+</config>
