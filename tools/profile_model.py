@@ -23,7 +23,11 @@ from utils.checkpoint import load_checkpoint
 
 
 def _slice_inputs(inputs, size: int):
-    return {key: value[:size] for key, value in inputs.items()}
+    if isinstance(inputs, torch.Tensor):
+        return inputs[:size]
+    if isinstance(inputs, dict):
+        return {key: _slice_inputs(value, size) for key, value in inputs.items()}
+    return inputs
 
 
 def _synchronize(device: torch.device) -> None:

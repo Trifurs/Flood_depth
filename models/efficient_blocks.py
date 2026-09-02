@@ -88,11 +88,16 @@ class GatedCrossStateEncoder(nn.Module):
     def forward(
         self, pre: torch.Tensor, event: torch.Tensor, change: torch.Tensor,
         valid: torch.Tensor, conditioning: torch.Tensor | None = None,
+        branch_validity: dict[str, torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         import torch.nn.functional as F
-        pre_features = self.temporal(pre)
-        event_features = self.temporal(event)
-        change_features = self.change(change)
+        branch_validity = branch_validity or {}
+        pre_valid = branch_validity.get("t1", valid)
+        event_valid = branch_validity.get("t2", valid)
+        change_valid = branch_validity.get("change", valid)
+        pre_features = self.temporal(pre * pre_valid)
+        event_features = self.temporal(event * event_valid)
+        change_features = self.change(change * change_valid)
         outputs: list[torch.Tensor] = []
         for i, (before, after, changed) in enumerate(zip(pre_features, event_features, change_features)):
             if self.conditioning is not None:
@@ -105,10 +110,16 @@ class GatedCrossStateEncoder(nn.Module):
             base = self.state[i](torch.cat((before, after), 1))
             difference = after - before
             evidence = self.delta[i](torch.cat((difference, difference.abs(), before * after, changed), 1))
-            fraction = F.adaptive_avg_pool2d(valid, base.shape[-2:])
+            pre_fraction = F.adaptive_avg_pool2d(pre_valid, base.shape[-2:])
+            event_fraction = F.adaptive_avg_pool2d(event_valid, base.shape[-2:])
+            change_fraction = F.adaptive_avg_pool2d(change_valid, base.shape[-2:])
+            fraction = (pre_fraction + event_fraction + change_fraction) / 3.0
             availability = F.interpolate(valid, base.shape[-2:], mode="nearest")
+            branch_availability = torch.maximum(
+                torch.maximum(pre_fraction, event_fraction), change_fraction
+            )
             gate = torch.sigmoid(self.gate[i](torch.cat((base, evidence, fraction, availability), 1)))
-            outputs.append(self.refine[i](base + gate * evidence * availability))
+            outputs.append(self.refine[i](base + gate * evidence * availability) * branch_availability)
         return outputs
 
 

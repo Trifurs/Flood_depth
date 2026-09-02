@@ -96,6 +96,13 @@ class CompositeFloodDepthLoss(nn.Module):
             if aggregation_mode in {"pixel_micro", "depth_bin_macro"}
             else "event_macro"
         )
+        effective_pu = self.scheduled_weight("pu", epoch)
+        effective_unc = self.scheduled_weight("unc", epoch)
+        effective_gradient = self.scheduled_weight("gradient", epoch)
+        effective_auxiliary = self.scheduled_weight("auxiliary", epoch)
+        effective_kan = self.scheduled_weight("kan", epoch)
+        effective_wse = self.wse_weight(epoch)
+        zero = label.sum() * 0.0
         lambda_final = float(self.config["lambda_final"])
         components = positive_depth_losses(
             outputs.get("conditional_depth", outputs["positive_depth"]),
@@ -117,45 +124,44 @@ class CompositeFloodDepthLoss(nn.Module):
             float(self.config.get("depth_huber_beta_m", 1.0)),
             float(self.config.get("log_depth_huber_beta", 1.0)),
         )
-        exceedance = event_depth_exceedance_loss(
-            outputs["depth"],
-            label,
-            positive,
-            events,
-            self.train_depth_bins,
-            float(self.config.get("depth_exceedance_temperature_m", 0.1)),
-            auxiliary_aggregation,
+        exceedance = (
+            event_depth_exceedance_loss(
+                outputs["depth"], label, positive, events, self.train_depth_bins,
+                float(self.config.get("depth_exceedance_temperature_m", 0.1)),
+                auxiliary_aggregation,
+            ) if float(self.config.get("lambda_depth_exceedance", 0.0)) != 0.0 else zero
         )
         components["depth_exceedance"] = exceedance
-        pu = nnpu_logistic_loss(
-            outputs["support_logits"],
-            positive,
-            unlabeled,
-            self.positive_prior,
-            events,
-            auxiliary_aggregation,
+        pu = (
+            nnpu_logistic_loss(
+                outputs["support_logits"], positive, unlabeled, self.positive_prior,
+                events, auxiliary_aggregation,
+            ) if effective_pu != 0.0 else {
+                "nnpu": zero, "pu_positive_risk": zero,
+                "pu_negative_risk_raw": zero, "pu_negative_risk_nonnegative": zero,
+            }
         )
         components.update(pu)
-        uncertainty = laplace_nll_loss(
-            outputs["depth"],
-            label,
-            outputs["uncertainty_scale"],
-            positive,
-            events,
-            self.train_depth_bins,
-            self.primary_depth_bins,
-            aggregation_mode,
+        uncertainty = (
+            laplace_nll_loss(
+                outputs["depth"], label, outputs["uncertainty_scale"], positive, events,
+                self.train_depth_bins, self.primary_depth_bins, aggregation_mode,
+            ) if effective_unc != 0.0 else zero
         )
         components["uncertainty"] = uncertainty
-        gradient = masked_gradient_consistency_loss(
-            outputs.get("conditional_depth", outputs["depth"]), label, positive,
-            float(self.config.get("gradient_huber_beta_m", 0.1)),
+        gradient = (
+            masked_gradient_consistency_loss(
+                outputs.get("conditional_depth", outputs["depth"]), label, positive,
+                float(self.config.get("gradient_huber_beta_m", 0.1)),
+            ) if effective_gradient != 0.0 else zero
         )
         components["gradient"] = gradient
-        auxiliary, auxiliary_terms = auxiliary_depth_loss(
-            outputs.get("auxiliary_depths", ()), label, positive,
-            self.config.get("auxiliary_depth_weights", ()),
-            float(self.config.get("depth_huber_beta_m", 1.0)),
+        auxiliary, auxiliary_terms = (
+            auxiliary_depth_loss(
+                outputs.get("auxiliary_depths", ()), label, positive,
+                self.config.get("auxiliary_depth_weights", ()),
+                float(self.config.get("depth_huber_beta_m", 1.0)),
+            ) if effective_auxiliary != 0.0 else (zero, [])
         )
         components["auxiliary"] = auxiliary
         for index, value in enumerate(auxiliary_terms):
@@ -164,7 +170,9 @@ class CompositeFloodDepthLoss(nn.Module):
         day_index = RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference")
         day_difference = batch["reliability"][:, day_index : day_index + 1]
         wse_mode = str(self.config.get("wse_mode", "absolute_laplacian"))
-        if wse_mode == "reference_gated_gradient":
+        if effective_wse == 0.0:
+            wse = zero
+        elif wse_mode == "reference_gated_gradient":
             wse = reference_gated_wse_gradient_loss(
                 outputs["depth"],
                 label,
@@ -211,20 +219,18 @@ class CompositeFloodDepthLoss(nn.Module):
                 f"'reference_gated_gradient', or 'terrain_order', got {wse_mode!r}"
             )
         components["wse"] = wse
-        effective_wse = self.wse_weight(epoch)
-        effective_pu = self.scheduled_weight("pu", epoch)
-        effective_unc = self.scheduled_weight("unc", epoch)
-        effective_gradient = self.scheduled_weight("gradient", epoch)
-        effective_auxiliary = self.scheduled_weight("auxiliary", epoch)
-        kan_magnitude = outputs.get("graph_diagnostics", {}).get(
-            "kan_coefficient_magnitude", total_zero := label.sum() * 0.0
-        )
-        kan_smoothness = outputs.get("graph_diagnostics", {}).get(
-            "kan_coefficient_smoothness", total_zero
-        )
+        if effective_kan != 0.0:
+            kan_magnitude = outputs.get("graph_diagnostics", {}).get(
+                "kan_coefficient_magnitude", zero
+            )
+            kan_smoothness = outputs.get("graph_diagnostics", {}).get(
+                "kan_coefficient_smoothness", zero
+            )
+        else:
+            kan_magnitude = zero
+            kan_smoothness = zero
         components["kan_magnitude"] = kan_magnitude
         components["kan_smoothness"] = kan_smoothness
-        effective_kan = self.scheduled_weight("kan", epoch)
         total = (
             float(self.config["lambda_depth"]) * components["depth"]
             + float(self.config.get("lambda_depth_bias", 0.0))

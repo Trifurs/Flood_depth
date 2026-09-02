@@ -147,12 +147,16 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         label = np.where(positive, arrays["label"][0], 0.0).astype(np.float32)[None]
 
         continuous: dict[str, np.ndarray] = {}
+        branch_valid_fractions: dict[str, np.ndarray] = {}
         for group in MODEL_CONTINUOUS_GROUPS:
             descriptions = list(self.band_spec.names(group))
             read_indexes = self.band_spec.read_indexes(self.contract, group)
             positions = [read_indexes.index(index) for index in self.band_spec.indexes(group)]
             selected_array = arrays[group][positions]
             selected_validity = validity[group][positions]
+            branch_valid_fractions[group] = selected_validity.astype(np.float32).mean(
+                axis=0, keepdims=True
+            )
             continuous[group] = self.normalizer.continuous(
                 group, descriptions, selected_array, selected_validity
             )
@@ -209,14 +213,15 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
 
         # Semantic validity and GeoTIFF/per-band validity must both hold. This avoids
         # treating a tensor-safety zero inserted at raster nodata as a real observation.
-        s1_raster_valid = np.logical_and.reduce(validity["s1_t2"], axis=0)
-        s2_raster_valid = np.logical_and.reduce(validity["s2_t2"], axis=0)
         terrain_raster_valid = np.logical_and.reduce(validity["terrain"], axis=0)
+        # Modality availability is a stable semantic mask from the contract.  It
+        # deliberately does not change when a model band is removed; branch-level
+        # fractions above carry the selected raster validity into each encoder.
         s1_valid = (
-            masks_np["S1_event_composite_valid_mask"][0] & s1_raster_valid
+            masks_np["S1_event_composite_valid_mask"][0]
         ).astype(np.float32)
         s2_valid = (
-            masks_np["S2_event_composite_valid_mask"][0] & s2_raster_valid
+            masks_np["S2_event_composite_valid_mask"][0]
         ).astype(np.float32)
         dem_valid = (
             masks_np["DEM_valid_mask"][0]
@@ -286,7 +291,21 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
                 "s1_valid": torch.from_numpy(s1_valid[None]),
                 "s2_valid": torch.from_numpy(s2_valid[None]),
                 "dem_valid": torch.from_numpy(dem_valid[None]),
+                # Explicit availability aliases make the semantic/physical
+                # validity contract unambiguous to augmentation and diagnostics.
+                "s1_available": torch.from_numpy(s1_valid[None]),
+                "s2_available": torch.from_numpy(s2_valid[None]),
+                "dem_available": torch.from_numpy(dem_valid[None]),
                 "output_valid": torch.from_numpy((dem_valid * np.maximum(s1_valid, s2_valid))[None]),
+                "s1_t1_valid_fraction": torch.from_numpy(branch_valid_fractions["s1_t1"]),
+                "s1_t2_valid_fraction": torch.from_numpy(branch_valid_fractions["s1_t2"]),
+                "s1_change_valid_fraction": torch.from_numpy(branch_valid_fractions["s1_change"]),
+                "s2_t1_valid_fraction": torch.from_numpy(branch_valid_fractions["s2_t1"]),
+                "s2_t2_valid_fraction": torch.from_numpy(branch_valid_fractions["s2_t2"]),
+                "s2_change_valid_fraction": torch.from_numpy(branch_valid_fractions["s2_change"]),
+                "dem_valid_fraction": torch.from_numpy(
+                    validity["terrain"].astype(np.float32).mean(axis=0, keepdims=True)
+                ),
             },
             "reliability": torch.from_numpy(reliability),
             "metadata": {
@@ -306,6 +325,9 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
                 "label_path": metadata_by_group["label"]["path"],
                 "reliability_names": RELIABILITY_NAMES,
                 "resolved_model_bands": self.band_spec.as_dict(),
+                "branch_valid_fractions": {
+                    key: value.mean().item() for key, value in branch_valid_fractions.items()
+                },
             },
         }
         if conditioning_parts:
@@ -342,6 +364,14 @@ def prepare_model_inputs(batch: dict[str, Any]) -> dict[str, Any]:
         "s1_valid": validity["s1_valid"],
         "s2_valid": validity["s2_valid"],
         "dem_valid": validity["dem_valid"],
+        "branch_validity": {
+            "s1_t1": validity["s1_t1_valid_fraction"],
+            "s1_t2": validity["s1_t2_valid_fraction"],
+            "s1_change": validity["s1_change_valid_fraction"],
+            "s2_t1": validity["s2_t1_valid_fraction"],
+            "s2_t2": validity["s2_t2_valid_fraction"],
+            "s2_change": validity["s2_change_valid_fraction"],
+        },
     }
     if "s1_conditioning" in batch:
         result["s1_conditioning"] = batch["s1_conditioning"]

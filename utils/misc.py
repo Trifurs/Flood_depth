@@ -33,15 +33,17 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
-def move_to_device(value: Any, device: torch.device) -> Any:
+def move_to_device(value: Any, device: torch.device, non_blocking: bool | None = None) -> Any:
     """Recursively transfer tensors while leaving metadata/provenance untouched."""
 
+    if non_blocking is None:
+        non_blocking = device.type == "cuda"
     if isinstance(value, torch.Tensor):
-        return value.to(device, non_blocking=device.type == "cuda")
+        return value.to(device, non_blocking=bool(non_blocking))
     if isinstance(value, dict):
-        return {key: move_to_device(item, device) for key, item in value.items()}
+        return {key: move_to_device(item, device, non_blocking) for key, item in value.items()}
     if isinstance(value, list):
-        return [move_to_device(item, device) for item in value]
+        return [move_to_device(item, device, non_blocking) for item in value]
     if isinstance(value, tuple):
-        return tuple(move_to_device(item, device) for item in value)
+        return tuple(move_to_device(item, device, non_blocking) for item in value)
     return value

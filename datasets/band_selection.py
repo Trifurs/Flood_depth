@@ -46,7 +46,7 @@ class BandSpec:
                         tuple(range(len(contract.group(group)["band_descriptions"]))),
                     )
                     for group in MODEL_CONTINUOUS_GROUPS
-                },
+                } | {"s1_conditioning": SelectedBands((), ())},
                 legacy_full_bands=True,
             )
         unknown_groups = set(configured).difference(MODEL_BAND_GROUPS)
@@ -66,6 +66,16 @@ class BandSpec:
             resolved[group] = SelectedBands(
                 requested, tuple(available.index(name) for name in requested)
             )
+        cls._validate_temporal_pair(
+            resolved["s1_t1"].names,
+            resolved["s1_t2"].names,
+            "S1",
+        )
+        cls._validate_temporal_pair(
+            resolved["s2_t1"].names,
+            resolved["s2_t2"].names,
+            "S2",
+        )
         conditioning = tuple(str(value) for value in configured.get("s1_conditioning", ()))
         if len(conditioning) != len(set(conditioning)):
             raise ValueError(f"Duplicate s1_conditioning names: {conditioning}")
@@ -91,6 +101,33 @@ class BandSpec:
         if empty_required:
             raise ValueError(f"Model band groups cannot be empty: {empty_required}")
         return cls(resolved, legacy_full_bands=False)
+
+    @staticmethod
+    def _temporal_base(name: str) -> str:
+        """Normalize only the temporal marker, retaining band semantics."""
+
+        value = str(name)
+        for marker in ("_pre_", "_event_"):
+            value = value.replace(marker, "_")
+        if value.endswith("_pre") or value.endswith("_event"):
+            value = value.rsplit("_", 1)[0]
+        return value
+
+    @classmethod
+    def _validate_temporal_pair(
+        cls, pre: Sequence[str], event: Sequence[str], modality: str
+    ) -> None:
+        if len(pre) != len(event):
+            raise ValueError(
+                f"{modality} T1/T2 band counts differ: {len(pre)} != {len(event)}"
+            )
+        pre_base = tuple(cls._temporal_base(name) for name in pre)
+        event_base = tuple(cls._temporal_base(name) for name in event)
+        if pre_base != event_base:
+            raise ValueError(
+                f"{modality} T1/T2 semantic/order mismatch: "
+                f"T1={list(pre)} T2={list(event)}"
+            )
 
     def names(self, group: str) -> tuple[str, ...]:
         return self.groups[group].names

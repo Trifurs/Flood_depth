@@ -72,20 +72,23 @@ class PAHydroKANV13(nn.Module):
         if missing:
             raise KeyError(f"Missing PA-HydroKAN-v13 inputs: {sorted(missing)}")
         conditioning = inputs.get("s1_conditioning")
+        branch_validity = inputs.get("branch_validity", {})
         if self.band_spec.channels("s1_conditioning") and conditioning is None:
             raise KeyError("Missing configured s1_conditioning")
         s1 = self.s1_encoder(
             inputs["s1_t1"], inputs["s1_t2"], inputs["s1_change"],
             inputs["s1_valid"], conditioning,
+            {key.removeprefix("s1_"): value for key, value in branch_validity.items() if key.startswith("s1_")},
         )
         s2 = self.s2_encoder(
             inputs["s2_t1"], inputs["s2_t2"], inputs["s2_change"],
             inputs["s2_valid"], None,
+            {key.removeprefix("s2_"): value for key, value in branch_validity.items() if key.startswith("s2_")},
         )
         terrain, physical = self.terrain(
             inputs["terrain"], inputs["terrain_raw"], inputs["dem_valid"]
         )
-        fused, weights, terrain_gates = self.fusion(
+        fused, weights, terrain_gates, fusion_entropy = self.fusion(
             s1, s2, terrain, inputs["reliability"], inputs["s1_valid"],
             inputs["s2_valid"], physical["dem_valid_fractions"],
         )
@@ -109,6 +112,7 @@ class PAHydroKANV13(nn.Module):
         outputs.update({
             "auxiliary_depths": auxiliaries, "modality_weights": weights,
             "terrain_gates": terrain_gates, "graph_diagnostics": diagnostics,
+            "fusion_entropy": fusion_entropy,
             "physical_features": physical,
         })
         return outputs

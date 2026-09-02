@@ -24,7 +24,11 @@ def auxiliary_depth_loss(auxiliary_depths: Sequence[torch.Tensor], target: torch
         pooled, fraction = masked_average_target(target, positive_mask, prediction.shape[-2:])
         selected = fraction > 0
         if selected.any():
-            term = F.smooth_l1_loss(prediction[selected], pooled[selected], beta=beta)
+            per_cell = F.smooth_l1_loss(
+                prediction, pooled, beta=beta, reduction="none"
+            )
+            area = fraction[selected]
+            term = (per_cell[selected] * area).sum() / area.sum().clamp_min(1e-8)
         else:
             term = prediction.sum() * 0.0
         terms.append(term)

@@ -23,6 +23,7 @@ def training_identity_sha256(
     dataset_fingerprint: Mapping[str, str],
     *,
     version: int = 2,
+    training_context: Mapping[str, Any] | None = None,
 ) -> str:
     """Hash every semantic field that must remain fixed across resume.
 
@@ -43,6 +44,8 @@ def training_identity_sha256(
                 "resolved_reliability_schema"
             )
     identity_fields["dataset_fingerprint"] = dict(dataset_fingerprint)
+    if version >= 3:
+        identity_fields["training_context"] = dict(training_context or {})
     return hashlib.sha256(
         json.dumps(identity_fields, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
@@ -123,10 +126,15 @@ def save_checkpoint(
     dataset_fingerprint: Mapping[str, str],
     extra: Mapping[str, Any] | None = None,
     ema: Any = None,
+    training_context: Mapping[str, Any] | None = None,
+    global_step: int = 0,
 ) -> None:
     unwrapped = model.module if hasattr(model, "module") else model
     identity_hash = training_identity_sha256(
-        resolved_config, dataset_fingerprint, version=2
+        resolved_config,
+        dataset_fingerprint,
+        version=3 if training_context is not None else 2,
+        training_context=training_context,
     )
     payload = {
         "model": unwrapped.state_dict(),
@@ -134,13 +142,15 @@ def save_checkpoint(
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "grad_scaler": scaler.state_dict() if scaler is not None else None,
         "epoch": int(epoch),
+        "global_step": int(global_step),
         "best_metric": float(best_metric),
         "rng_states": capture_rng_state(),
         "resolved_config": dict(resolved_config),
         "dataset_fingerprint": dict(dataset_fingerprint),
         "extra": dict(extra or {}),
         "training_identity_sha256": identity_hash,
-        "training_identity_version": 2,
+        "training_identity_version": 3 if training_context is not None else 2,
+        "training_identity_context": dict(training_context or {}),
         "ema": ema.state_dict() if ema is not None else None,
         "ema_model": ema.model_state_dict() if ema is not None else None,
     }
@@ -160,6 +170,7 @@ def load_checkpoint(
     adopt_checkpoint_output_semantics: bool = True,
     expected_training_identity_sha256: str | None = None,
     expected_legacy_training_identity_sha256: str | None = None,
+    expected_legacy_v1_training_identity_sha256: str | None = None,
 ) -> dict[str, Any]:
     checkpoint = torch.load(Path(path), map_location=map_location, weights_only=False)
     if expected_fingerprint is not None and dict(checkpoint.get("dataset_fingerprint", {})) != dict(
@@ -175,8 +186,10 @@ def load_checkpoint(
         identity_version = int(checkpoint.get("training_identity_version", 1))
         expected_identity = (
             expected_training_identity_sha256
-            if identity_version >= 2
+            if identity_version >= 3
             else expected_legacy_training_identity_sha256
+            if identity_version == 2
+            else expected_legacy_v1_training_identity_sha256
         )
         if saved_identity is None or expected_identity is None or saved_identity != expected_identity:
             raise CheckpointError(

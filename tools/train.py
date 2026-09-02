@@ -32,6 +32,7 @@ from datasets.band_selection import resolve_band_spec
 from datasets.flooddepth_dataset import FloodDepthDataset, prepare_model_inputs
 from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
 from datasets.samplers import (
+    BalancedRemainderBatchSampler,
     DistributedEventBalancedSampler,
     DistributedEventEpochSampler,
     EventEpochSampler,
@@ -112,6 +113,10 @@ def normalize_accumulated_gradients(model: torch.nn.Module, sample_count: int) -
 
 
 def resolve_cli(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    resume = getattr(args, "resume", None)
+    init_checkpoint = getattr(args, "init_checkpoint", None)
+    if resume is not None and init_checkpoint is not None:
+        raise ValueError("--resume and --init-checkpoint are mutually exclusive")
     if args.device is not None:
         config["device"] = args.device
     if args.epochs is not None:
@@ -131,6 +136,28 @@ def resolve_cli(config: dict[str, Any], args: argparse.Namespace) -> dict[str, A
     return config
 
 
+def make_training_context(
+    config: Mapping[str, Any], loader: DataLoader, epochs: int, accumulation: int,
+    max_train_batches: int | None,
+) -> dict[str, Any]:
+    effective_batches = min(len(loader), max_train_batches or len(loader))
+    steps_per_epoch = math.ceil(effective_batches / accumulation)
+    return {
+        "epochs": int(epochs),
+        "batch_size": int(config["training"]["batch_size"]),
+        "gradient_accumulation_steps": int(accumulation),
+        "sampler": type(getattr(loader, "sampler", None)).__name__,
+        "batch_sampler": type(getattr(loader, "batch_sampler", None)).__name__,
+        "sampling": jsonable_config(config["dataset"]["sampling"]),
+        "augmentation": jsonable_config(config["dataset"]["augmentation"]),
+        "seed": int(config["seed"]),
+        "effective_train_batches": int(effective_batches),
+        "steps_per_epoch": int(steps_per_epoch),
+        "planned_total_optimizer_steps": int(epochs * steps_per_epoch),
+        "warmup_steps": int(config["scheduler"]["warmup_epochs"]) * steps_per_epoch,
+    }
+
+
 def create_dataloaders(
     config: dict[str, Any], rank: int = 0, world_size: int = 1
 ) -> tuple[DataLoader, DataLoader, FloodDepthDataset, FloodDepthDataset]:
@@ -139,7 +166,9 @@ def create_dataloaders(
         float(augmentation["horizontal_flip_probability"]),
         float(augmentation["vertical_flip_probability"]),
         float(augmentation["rotate90_probability"]),
-        float(augmentation["modality_dropout_probability"]),
+        augmentation.get("modality_dropout_probability"),
+        augmentation.get("feature_dropout_probability"),
+        augmentation.get("sensor_missing_simulation_probability"),
     )
     contract = DatasetContract.load(config["dataset"]["contract"])
     band_spec = resolve_band_spec(config, contract)
@@ -184,9 +213,11 @@ def create_dataloaders(
         common["prefetch_factor"] = int(config["training"].get("prefetch_factor", 2))
     train_loader = DataLoader(
         train_dataset,
-        batch_size=int(config["training"]["batch_size"]),
-        sampler=sampler,
-        drop_last=bool(config["training"].get("drop_last", False)),
+        batch_sampler=BalancedRemainderBatchSampler(
+            sampler,
+            int(config["training"]["batch_size"]),
+            bool(config["training"].get("drop_last", False)),
+        ),
         **common,
     )
     val_loader = DataLoader(
@@ -234,6 +265,7 @@ def train_one_epoch(
     ema: ModelEMA | None = None,
     log_every_steps: int = 10,
     csv_enabled: bool = True,
+    non_blocking: bool = True,
 ) -> dict[str, float]:
     model.train()
     if hasattr(loader.sampler, "set_epoch"):
@@ -247,19 +279,64 @@ def train_one_epoch(
     accumulated_samples = 0
     optimizer_steps = 0
     skipped_steps = 0
-    last_step_time = time.perf_counter()
+    interval_start = time.perf_counter()
+    interval_samples = 0
+    interval_data_time = 0.0
+    interval_compute_time = 0.0
+    last_batch_end = interval_start
     for batch_index, cpu_batch in enumerate(iterator):
         if max_batches is not None and batch_index >= max_batches:
             break
-        batch = move_to_device(cpu_batch, device)
+        batch_received = time.perf_counter()
+        interval_data_time += batch_received - last_batch_end
+        compute_start = batch_received
+        batch = move_to_device(cpu_batch, device, non_blocking=non_blocking)
         batch_size = int(cpu_batch["label"].shape[0])
         with torch.autocast(
             device_type=device.type, enabled=amp_enabled, dtype=amp_dtype
         ):
             outputs = model(prepare_model_inputs(batch))
             loss, components = criterion(outputs, batch, epoch)
-        if not torch.isfinite(loss):
-            raise FloatingPointError(f"Non-finite training loss at epoch={epoch}, batch={batch_index}")
+        nonfinite = [name for name, value in components.items()
+                     if not torch.isfinite(value.detach()).all()]
+        if not torch.isfinite(loss).all() or nonfinite:
+            def value_range(value: Any) -> list[float | None]:
+                if not isinstance(value, torch.Tensor):
+                    return [None, None]
+                finite = value.detach().float()[torch.isfinite(value.detach().float())]
+                if finite.numel() == 0:
+                    return [None, None]
+                return [float(finite.min().cpu()), float(finite.max().cpu())]
+            positive_mask = batch["masks"]["valid_depth_mask"] > 0.5
+            unlabeled_mask = (
+                (batch["validity"]["output_valid"] > 0.5) & ~positive_mask
+                & ~(batch["masks"]["permanent_water_mask"] > 0.5)
+                & ~(batch["masks"]["extreme_high_mask"] > 0.5)
+            )
+            graph_payload = {
+                key: float(value.detach().float().mean().cpu())
+                for key, value in outputs.get("graph_diagnostics", {}).items()
+                if isinstance(value, torch.Tensor)
+            }
+            payload = {
+                "epoch": epoch,
+                "batch": batch_index,
+                "sample_id": str(cpu_batch.get("metadata", {}).get("sample_id", "unknown")),
+                "nonfinite_components": nonfinite,
+                "loss": float(loss.detach().float().cpu()) if torch.isfinite(loss).all() else None,
+                "prediction_range": value_range(outputs.get("depth")),
+                "target_range": value_range(batch.get("label")),
+                "uncertainty_range": value_range(outputs.get("uncertainty_scale")),
+                "positive_pixels": int(positive_mask.sum().item()),
+                "unlabeled_pixels": int(unlabeled_mask.sum().item()),
+                "graph_diagnostics": graph_payload,
+                "amp_scale": float(scaler.get_scale()),
+            }
+            if rank == 0:
+                with (run_dir / "nonfinite_losses.jsonl").open("a", encoding="utf-8") as handle:
+                    import json
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            raise FloatingPointError(f"Non-finite training loss at epoch={epoch}, batch={batch_index}; components={nonfinite}")
         # Accumulate sums over samples, then normalize the complete (including
         # short final) window once before clipping.  This prevents a singleton or
         # max-batches remainder from receiving a full-sized update.
@@ -292,6 +369,8 @@ def train_one_epoch(
         for name, value in components.items():
             sums[name] = sums.get(name, 0.0) + float(value.detach().cpu()) * batch_size
         samples += batch_size
+        interval_samples += batch_size
+        interval_compute_time += time.perf_counter() - compute_start
         if rank == 0:
             iterator.set_postfix(loss=f"{float(loss.detach()):.4f}")
         if rank == 0 and csv_enabled and (
@@ -299,8 +378,28 @@ def train_one_epoch(
         ):
             now = time.perf_counter()
             graph = outputs.get("graph_diagnostics", {})
-            modality_mean = torch.stack([value.mean() for value in outputs.get("modality_weights", [])]).mean() if outputs.get("modality_weights") else loss.new_tensor(float("nan"))
+            modality_weights = outputs.get("modality_weights", [])
+            modality_mean = torch.stack([value.mean() for value in modality_weights]).mean() if modality_weights else loss.new_tensor(float("nan"))
+            s1_weight_mean = torch.stack([value[:, 0:1].mean() for value in modality_weights]).mean() if modality_weights else loss.new_tensor(float("nan"))
+            s2_weight_mean = torch.stack([value[:, 1:2].mean() for value in modality_weights]).mean() if modality_weights else loss.new_tensor(float("nan"))
             uncertainty = outputs["uncertainty_scale"].detach().float()
+            elapsed = max(now - interval_start, 1e-9)
+            terrain_gate = outputs.get("terrain_gates", [])
+            terrain_gate_mean = (
+                torch.stack([value.mean() for value in terrain_gate]).mean()
+                if terrain_gate else loss.new_tensor(float("nan"))
+            )
+            fusion_entropy = outputs.get("fusion_entropy", [])
+            fusion_entropy_mean = (
+                torch.stack([value.mean() for value in fusion_entropy]).mean()
+                if fusion_entropy else loss.new_tensor(float("nan"))
+            )
+            if isinstance(batch.get("validity"), Mapping):
+                both_valid = (
+                    torch.minimum(batch["validity"]["s1_valid"], batch["validity"]["s2_valid"]) > 0.5
+                ).float().mean()
+            else:
+                both_valid = loss.new_tensor(float("nan"))
             append_csv(
                 run_dir / "train_steps.csv",
                 {
@@ -313,17 +412,30 @@ def train_one_epoch(
                     "amp_scale": float(scaler.get_scale()),
                     "optimizer_steps": optimizer_steps,
                     "skipped_steps": skipped_steps,
-                    "step_time_seconds": now - last_step_time,
-                    "samples_per_second": batch_size / max(now - last_step_time, 1e-9),
+                    "step_time_seconds": elapsed,
+                    "samples_per_second": interval_samples / elapsed,
+                    "interval_samples": interval_samples,
+                    "data_time_seconds": interval_data_time,
+                    "compute_time_seconds": interval_compute_time,
                     "graph_gate_mean": float(graph.get("gate_mean", loss.new_tensor(float("nan"))).detach().cpu()),
                     "graph_gamma_mean": float(graph.get("gamma_mean", loss.new_tensor(float("nan"))).detach().cpu()),
                     "modality_weight_mean": float(modality_mean.detach().cpu()),
+                    "s1_weight_mean": float(s1_weight_mean.detach().cpu()),
+                    "s2_weight_mean": float(s2_weight_mean.detach().cpu()),
+                    "fusion_entropy_mean": float(fusion_entropy_mean.detach().cpu()),
+                    "terrain_gate_mean": float(terrain_gate_mean.detach().cpu()),
+                    "both_sensor_valid_ratio": float(both_valid.detach().cpu()),
                     "uncertainty_scale_mean": float(uncertainty.mean().cpu()),
+                    "uncertainty_scale_p90": float(torch.quantile(uncertainty.flatten(), 0.9).cpu()),
                     "gpu_allocated_bytes": torch.cuda.memory_allocated(device) if device.type == "cuda" else 0,
                     "gpu_reserved_bytes": torch.cuda.memory_reserved(device) if device.type == "cuda" else 0,
                 },
             )
-            last_step_time = now
+            interval_start = now
+            interval_samples = 0
+            interval_data_time = 0.0
+            interval_compute_time = 0.0
+        last_batch_end = time.perf_counter()
     if batches == 0:
         raise RuntimeError("No train batches were executed")
     result = {name: value / samples for name, value in sums.items()}
@@ -382,6 +494,19 @@ def run_training(args: argparse.Namespace) -> Path:
     LOGGER.info("train-only depth stratification edges (m)=%s", depth_bins)
 
     model = build_model(config).to(device)
+    parent_checkpoint = None
+    if args.init_checkpoint is not None:
+        parent_checkpoint = args.init_checkpoint.resolve()
+        init_payload = load_checkpoint(
+            parent_checkpoint, model, map_location=device,
+            adopt_checkpoint_output_semantics=True,
+        )
+        if args.init_weights == "ema" and init_payload.get("ema_model") is not None:
+            model.load_state_dict(init_payload["ema_model"], strict=True)
+        elif args.init_weights == "ema":
+            LOGGER.warning(
+                "init checkpoint has no EMA state; initializing the new stage from raw weights"
+            )
     total_parameters = sum(parameter.numel() for parameter in model.parameters())
     trainable_parameters = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
@@ -404,6 +529,9 @@ def run_training(args: argparse.Namespace) -> Path:
     steps_per_epoch = math.ceil(effective_train_batches / accumulation)
     total_steps = max(1, epochs * steps_per_epoch)
     warmup_steps = int(config["scheduler"]["warmup_epochs"]) * steps_per_epoch
+    training_context = make_training_context(
+        config, train_loader, epochs, accumulation, args.max_train_batches
+    )
     scheduler = build_scheduler(optimizer, config, total_steps, warmup_steps)
     amp_enabled, amp_dtype, scaler_enabled = resolve_amp(
         device, bool(config["training"]["amp"]),
@@ -420,11 +548,17 @@ def run_training(args: argparse.Namespace) -> Path:
     fingerprint = dataset_fingerprint(config)
     monitor = str(config["training"]["best_metric"])
     start_epoch, best_metric, patience = 0, float("inf"), 0
+    global_step = 0
+    best_raw_metric, best_ema_metric = float("inf"), float("inf")
     if args.resume is not None:
         current_identity = training_identity_sha256(
-            jsonable_config(config), fingerprint, version=2
+            jsonable_config(config), fingerprint, version=3,
+            training_context=training_context,
         )
         legacy_identity = training_identity_sha256(
+            jsonable_config(config), fingerprint, version=2
+        )
+        legacy_v1_identity = training_identity_sha256(
             jsonable_config(config), fingerprint, version=1
         )
         checkpoint = load_checkpoint(
@@ -439,6 +573,7 @@ def run_training(args: argparse.Namespace) -> Path:
             map_location=device,
             expected_training_identity_sha256=current_identity,
             expected_legacy_training_identity_sha256=legacy_identity,
+            expected_legacy_v1_training_identity_sha256=legacy_v1_identity,
         )
         if ema is not None and checkpoint.get("ema") is not None:
             ema.load_state_dict(checkpoint["ema"])
@@ -481,7 +616,11 @@ def run_training(args: argparse.Namespace) -> Path:
                 "configuration. Start a new run for a changed objective."
             )
         start_epoch = int(checkpoint["epoch"]) + 1
+        global_step = int(checkpoint.get("global_step", 0))
         best_metric = float(checkpoint["best_metric"])
+        saved_extra = checkpoint.get("extra", {})
+        best_raw_metric = float(saved_extra.get("best_raw_metric", best_metric))
+        best_ema_metric = float(saved_extra.get("best_ema_metric", best_metric))
         patience = int(checkpoint.get("extra", {}).get("early_stop_patience", -1))
         if patience < 0:
             patience = infer_legacy_patience(
@@ -503,6 +642,12 @@ def run_training(args: argparse.Namespace) -> Path:
         atomic_write_json(run_dir / "resolved_config.json", jsonable_config(config))
         atomic_write_json(run_dir / "environment.json", environment_payload(device))
         atomic_write_json(run_dir / "dataset_fingerprint.json", fingerprint)
+        if parent_checkpoint is not None:
+            atomic_write_json(
+                run_dir / "run_metadata.json",
+                {"stage": "init_checkpoint", "parent_checkpoint": str(parent_checkpoint),
+                 "init_weights": args.init_weights},
+            )
         atomic_write_json(
             run_dir / "model_summary.json",
             {
@@ -551,7 +696,9 @@ def run_training(args: argparse.Namespace) -> Path:
                 ema,
                 int(config["logging"]["log_every_steps"]),
                 bool(config["logging"]["csv"]),
+                bool(config["training"].get("non_blocking", device.type == "cuda")),
             )
+            global_step += int(train_metrics.get("optimizer_steps", 0.0))
             validation_interval = max(
                 1, int(config["training"].get("validation_interval", 1))
             )
@@ -578,8 +725,12 @@ def run_training(args: argparse.Namespace) -> Path:
                                 "depth_stratification_edges_m": depth_bins,
                                 "primary_depth_stratification_edges_m": normalizer.train_depth_bins,
                                 "early_stop_patience": patience,
+                                "best_raw_metric": best_raw_metric,
+                                "best_ema_metric": best_ema_metric,
                             },
                             ema=ema,
+                            training_context=training_context,
+                            global_step=global_step,
                         )
                     LOGGER.info(
                         "epoch=%d train_loss=%.5f validation=skipped interval=%d",
@@ -624,6 +775,17 @@ def run_training(args: argparse.Namespace) -> Path:
                 raise KeyError(
                     f"Configured best metric {monitor!r} is absent from validation summary"
                 )
+            raw_metric = float(val_summary[monitor])
+            ema_metric = float(ema_summary[monitor]) if ema_summary is not None else None
+            raw_improved = raw_metric < best_raw_metric - float(config["training"].get("min_delta", 0.0))
+            ema_improved = (
+                ema_metric is not None
+                and ema_metric < best_ema_metric - float(config["training"].get("min_delta", 0.0))
+            )
+            if raw_improved:
+                best_raw_metric = raw_metric
+            if ema_improved and ema_metric is not None:
+                best_ema_metric = ema_metric
             metric = float(selected_summary[monitor])
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(metric)
@@ -662,13 +824,37 @@ def run_training(args: argparse.Namespace) -> Path:
                         "depth_stratification_edges_m": depth_bins,
                         "primary_depth_stratification_edges_m": normalizer.train_depth_bins,
                         "early_stop_patience": patience,
+                        "best_raw_metric": best_raw_metric,
+                        "best_ema_metric": best_ema_metric,
                     },
                 )
                 if bool(config["checkpoint"]["save_last"]):
-                    save_checkpoint(run_dir / "last.pth", ema=ema, **common)
+                    save_checkpoint(
+                        run_dir / "last.pth", ema=ema, training_context=training_context,
+                        global_step=global_step, **common
+                    )
                 if improved:
                     if bool(config["checkpoint"]["save_best"]):
-                        save_checkpoint(run_dir / "best.pth", ema=ema, **common)
+                        save_checkpoint(
+                            run_dir / "best.pth", ema=ema, training_context=training_context,
+                            global_step=global_step, **common
+                        )
+                if raw_improved and bool(config["checkpoint"]["save_best"]):
+                    raw_common = dict(common)
+                    raw_common["best_metric"] = best_raw_metric
+                    save_checkpoint(
+                        run_dir / "best_raw.pth",
+                        ema=ema, training_context=training_context,
+                        global_step=global_step, **raw_common
+                    )
+                if ema_improved and bool(config["checkpoint"]["save_best"]):
+                    ema_common = dict(common)
+                    ema_common["best_metric"] = best_ema_metric
+                    save_checkpoint(
+                        run_dir / "best_ema.pth",
+                        ema=ema, training_context=training_context,
+                        global_step=global_step, **ema_common
+                    )
                 LOGGER.info(
                     "epoch=%d train_loss=%.5f val_%s=%.5f best=%.5f",
                     epoch,
@@ -709,6 +895,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--init-checkpoint", type=Path)
+    parser.add_argument("--init-weights", choices=("raw", "ema"), default="raw")
     parser.add_argument("--max-train-batches", type=int)
     parser.add_argument("--max-val-batches", type=int)
     parser.add_argument("--no-amp", action="store_true")

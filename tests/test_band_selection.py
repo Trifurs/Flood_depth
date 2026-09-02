@@ -30,3 +30,15 @@ def test_unknown_band_fails_and_legacy_uses_every_channel() -> None:
     assert legacy.legacy_full_bands
     assert legacy.channels("s2_t1") == 6
 
+
+def test_temporal_pair_mismatch_is_rejected() -> None:
+    with pytest.raises(ValueError, match="semantic/order mismatch"):
+        BandSpec.resolve(contract(), {
+            "s1_t1": ["VV_pre_db", "VH_pre_db"],
+            "s1_t2": ["VV_event_db", "angle_event_deg"],
+            "s1_change": ["VV_delta_db"],
+            "s2_t1": ["B3_pre_reflectance"],
+            "s2_t2": ["B3_event_reflectance"],
+            "s2_change": ["NDWI_delta"],
+            "terrain": ["elevation_m_DSM"],
+        })

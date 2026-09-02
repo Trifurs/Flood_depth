@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <!-- v13.1 candidate: fixed hydro_compact bands, no band search. -->
+  <include path="subset150_v13_compact.xml" />
+  <run_name type="str">pa_hydrokan_subset150_hydrov13_1_candidate_v131</run_name>
+  <training>
+    <epochs type="int">45</epochs>
+    <minimum_epochs type="int">40</minimum_epochs>
+    <early_stop_patience type="int">15</early_stop_patience>
+    <num_workers type="int">4</num_workers>
+    <persistent_workers type="bool">true</persistent_workers>
+  </training>
+  <dataset><augmentation>
+    <feature_dropout_probability type="float">0.05</feature_dropout_probability>
+    <sensor_missing_simulation_probability type="float">0.05</sensor_missing_simulation_probability>
+  </augmentation></dataset>
+  <model>
+    <name type="str">pa_hydrokan_v13_1</name>
+    <graph_heads type="int">2</graph_heads>
+    <graph_edge_features type="list" item_type="str">
+      <item>signed_dz</item><item>absolute_dz</item><item>edge_slope</item><item>barrier</item>
+      <item>sensor_valid_fraction</item><item>dem_valid_fraction</item>
+      <item>modality_weight_concentration</item><item>normalized_sensor_day_difference</item>
+      <item>latent_signed_difference</item><item>latent_absolute_difference</item><item>neighbour_distance</item>
+    </graph_edge_features>
+    <decoder_widths type="list" item_type="int"><item>64</item><item>48</item><item>32</item></decoder_widths>
+  </model>
+</config>

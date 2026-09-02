@@ -8,7 +8,7 @@ import math
 from typing import Iterator, Sequence
 
 import torch
-from torch.utils.data import Sampler, WeightedRandomSampler
+from torch.utils.data import BatchSampler, Sampler, WeightedRandomSampler
 
 
 LOGGER = logging.getLogger(__name__)
@@ -149,3 +149,42 @@ class DistributedEventEpochSampler(Sampler[int]):
 
     def __len__(self) -> int:
         return self.num_samples
+
+
+class BalancedRemainderBatchSampler(BatchSampler):
+    """Batch a sampler without creating a tiny final remainder batch.
+
+    The number of batches is ``ceil(n / batch_size)`` (unless ``drop_last`` is
+    requested), and indices are partitioned into sizes differing by at most one.
+    This keeps every sample while avoiding a singleton for ordinary datasets.
+    """
+
+    def __init__(
+        self, sampler: Sampler[int], batch_size: int, drop_last: bool = False
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        super().__init__(sampler, batch_size, drop_last)
+
+    def __iter__(self) -> Iterator[list[int]]:
+        indices = list(iter(self.sampler))
+        if self.drop_last:
+            count = len(indices) // self.batch_size
+            usable = indices[: count * self.batch_size]
+            sizes = [self.batch_size] * count
+        else:
+            count = math.ceil(len(indices) / self.batch_size)
+            if count == 0:
+                return
+            base, remainder = divmod(len(indices), count)
+            sizes = [base + (index < remainder) for index in range(count)]
+            usable = indices
+        offset = 0
+        for size in sizes:
+            yield usable[offset : offset + size]
+            offset += size
+
+    def __len__(self) -> int:
+        if self.drop_last:
+            return len(self.sampler) // self.batch_size
+        return math.ceil(len(self.sampler) / self.batch_size)
