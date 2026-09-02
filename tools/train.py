@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import datetime, timezone
 import logging
 import math
@@ -27,6 +28,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from datasets.contract import DatasetContract, sha256_file
+from datasets.band_selection import resolve_band_spec
 from datasets.flooddepth_dataset import FloodDepthDataset, prepare_model_inputs
 from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
 from datasets.samplers import (
@@ -42,16 +44,71 @@ from utils.checkpoint import (
     checkpoint_depth_output_semantics,
     load_checkpoint,
     save_checkpoint,
+    training_identity_sha256,
 )
 from utils.config import jsonable_config, load_config
-from utils.distributed import cleanup_distributed, initialize_distributed, is_main_process
+from utils.distributed import (
+    broadcast_object,
+    cleanup_distributed,
+    initialize_distributed,
+    is_main_process,
+    reduce_weighted_metrics,
+)
 from utils.logging import append_csv, setup_logging
 from utils.misc import atomic_write_json, move_to_device
 from utils.registry import build_model
 from utils.seed import seed_everything, seed_worker
+from utils.amp import resolve_amp
+from utils.ema import ModelEMA
+from utils.optim import build_optimizer, build_scheduler
 
 
 LOGGER = logging.getLogger("train")
+
+
+def infer_legacy_patience(
+    metrics_path: Path,
+    checkpoint_epoch: int,
+    monitor: str,
+    weights: str,
+    min_delta: float,
+) -> int:
+    """Recover an early-stop counter from legacy epoch CSV when possible."""
+
+    if not metrics_path.exists():
+        return 0
+    metric_column = (
+        f"val_ema_{monitor}" if weights == "ema" else f"val_{monitor}"
+    )
+    best = float("inf")
+    last_improvement = -1
+    with metrics_path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            epoch = int(row["epoch"])
+            if epoch > checkpoint_epoch or not row.get(metric_column):
+                continue
+            value = float(row[metric_column])
+            if value < best - min_delta:
+                best = value
+                last_improvement = epoch
+    return max(0, checkpoint_epoch - last_improvement) if last_improvement >= 0 else 0
+
+
+def accumulation_window_sizes(total_batches: int, accumulation_steps: int) -> list[int]:
+    if total_batches < 0 or accumulation_steps <= 0:
+        raise ValueError("Invalid accumulation dimensions")
+    return [
+        min(accumulation_steps, total_batches - start)
+        for start in range(0, total_batches, accumulation_steps)
+    ]
+
+
+def normalize_accumulated_gradients(model: torch.nn.Module, sample_count: int) -> None:
+    if sample_count <= 0:
+        raise ValueError("sample_count must be positive")
+    for parameter in model.parameters():
+        if parameter.grad is not None:
+            parameter.grad.div_(sample_count)
 
 
 def resolve_cli(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -84,14 +141,18 @@ def create_dataloaders(
         float(augmentation["rotate90_probability"]),
         float(augmentation["modality_dropout_probability"]),
     )
+    contract = DatasetContract.load(config["dataset"]["contract"])
+    band_spec = resolve_band_spec(config, contract)
     train_dataset = FloodDepthDataset(
         config["dataset"]["contract"],
         config["dataset"]["train_stats"],
         "train",
         transform=transform,
+        band_spec=band_spec,
     )
     val_dataset = FloodDepthDataset(
-        config["dataset"]["contract"], config["dataset"]["train_stats"], "val"
+        config["dataset"]["contract"], config["dataset"]["train_stats"], "val",
+        band_spec=band_spec,
     )
     replacement = bool(config["dataset"]["sampling"].get("replacement", False))
     if world_size > 1:
@@ -119,11 +180,13 @@ def create_dataloaders(
         "worker_init_fn": seed_worker,
         "generator": generator,
     }
+    if workers > 0:
+        common["prefetch_factor"] = int(config["training"].get("prefetch_factor", 2))
     train_loader = DataLoader(
         train_dataset,
         batch_size=int(config["training"]["batch_size"]),
         sampler=sampler,
-        drop_last=False,
+        drop_last=bool(config["training"].get("drop_last", False)),
         **common,
     )
     val_loader = DataLoader(
@@ -164,9 +227,13 @@ def train_one_epoch(
     accumulation_steps: int,
     grad_clip: float,
     amp_enabled: bool,
+    amp_dtype: torch.dtype,
     max_batches: int | None,
     run_dir: Path,
     rank: int,
+    ema: ModelEMA | None = None,
+    log_every_steps: int = 10,
+    csv_enabled: bool = True,
 ) -> dict[str, float]:
     model.train()
     if hasattr(loader.sampler, "set_epoch"):
@@ -174,35 +241,66 @@ def train_one_epoch(
     optimizer.zero_grad(set_to_none=True)
     sums: dict[str, float] = {}
     batches = 0
+    samples = 0
     iterator = tqdm(loader, desc=f"train {epoch + 1}", leave=False, disable=rank != 0)
+    effective_batches = min(len(loader), max_batches or len(loader))
+    accumulated_samples = 0
+    optimizer_steps = 0
+    skipped_steps = 0
+    last_step_time = time.perf_counter()
     for batch_index, cpu_batch in enumerate(iterator):
         if max_batches is not None and batch_index >= max_batches:
             break
         batch = move_to_device(cpu_batch, device)
-        with torch.autocast(device_type=device.type, enabled=amp_enabled):
+        batch_size = int(cpu_batch["label"].shape[0])
+        with torch.autocast(
+            device_type=device.type, enabled=amp_enabled, dtype=amp_dtype
+        ):
             outputs = model(prepare_model_inputs(batch))
             loss, components = criterion(outputs, batch, epoch)
-            scaled_loss = loss / accumulation_steps
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Non-finite training loss at epoch={epoch}, batch={batch_index}")
-        scaler.scale(scaled_loss).backward()
-        final_batch = batch_index + 1 == len(loader) or (
-            max_batches is not None and batch_index + 1 >= max_batches
-        )
+        # Accumulate sums over samples, then normalize the complete (including
+        # short final) window once before clipping.  This prevents a singleton or
+        # max-batches remainder from receiving a full-sized update.
+        scaler.scale(loss * batch_size).backward()
+        accumulated_samples += batch_size
+        final_batch = batch_index + 1 >= effective_batches
         if (batch_index + 1) % accumulation_steps == 0 or final_batch:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            normalize_accumulated_gradients(model, accumulated_samples)
+            raw_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
+            clipped_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
-            if scaler.get_scale() >= scale_before:
-                scheduler.step()
+            successful_step = (not scaler.is_enabled()) or scaler.get_scale() >= scale_before
+            if successful_step:
+                if not isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step()
+                if ema is not None:
+                    ema.update(model)
+                optimizer_steps += 1
+            else:
+                skipped_steps += 1
+            accumulated_samples = 0
+        else:
+            raw_grad_norm = loss.new_tensor(float("nan"))
+            clipped_grad_norm = loss.new_tensor(float("nan"))
         batches += 1
         for name, value in components.items():
-            sums[name] = sums.get(name, 0.0) + float(value.detach().cpu())
+            sums[name] = sums.get(name, 0.0) + float(value.detach().cpu()) * batch_size
+        samples += batch_size
         if rank == 0:
             iterator.set_postfix(loss=f"{float(loss.detach()):.4f}")
+        if rank == 0 and csv_enabled and (
+            batch_index % max(1, log_every_steps) == 0 or final_batch
+        ):
+            now = time.perf_counter()
+            graph = outputs.get("graph_diagnostics", {})
+            modality_mean = torch.stack([value.mean() for value in outputs.get("modality_weights", [])]).mean() if outputs.get("modality_weights") else loss.new_tensor(float("nan"))
+            uncertainty = outputs["uncertainty_scale"].detach().float()
             append_csv(
                 run_dir / "train_steps.csv",
                 {
@@ -210,11 +308,32 @@ def train_one_epoch(
                     "batch": batch_index,
                     "loss": float(loss.detach().cpu()),
                     "learning_rate": optimizer.param_groups[0]["lr"],
+                    "raw_gradient_norm": float(raw_grad_norm.detach().cpu()),
+                    "clipped_gradient_norm": float(clipped_grad_norm.detach().cpu()),
+                    "amp_scale": float(scaler.get_scale()),
+                    "optimizer_steps": optimizer_steps,
+                    "skipped_steps": skipped_steps,
+                    "step_time_seconds": now - last_step_time,
+                    "samples_per_second": batch_size / max(now - last_step_time, 1e-9),
+                    "graph_gate_mean": float(graph.get("gate_mean", loss.new_tensor(float("nan"))).detach().cpu()),
+                    "graph_gamma_mean": float(graph.get("gamma_mean", loss.new_tensor(float("nan"))).detach().cpu()),
+                    "modality_weight_mean": float(modality_mean.detach().cpu()),
+                    "uncertainty_scale_mean": float(uncertainty.mean().cpu()),
+                    "gpu_allocated_bytes": torch.cuda.memory_allocated(device) if device.type == "cuda" else 0,
+                    "gpu_reserved_bytes": torch.cuda.memory_reserved(device) if device.type == "cuda" else 0,
                 },
             )
+            last_step_time = now
     if batches == 0:
         raise RuntimeError("No train batches were executed")
-    return {name: value / batches for name, value in sums.items()}
+    result = {name: value / samples for name, value in sums.items()}
+    result.update({"optimizer_steps": float(optimizer_steps), "amp_skipped_steps": float(skipped_steps)})
+    averaged = reduce_weighted_metrics(result, samples, device)
+    # Optimizer-step counters are identical across correctly sharded DDP ranks;
+    # retain the per-rank value rather than treating them as sample averages.
+    averaged["optimizer_steps"] = float(optimizer_steps)
+    averaged["amp_skipped_steps"] = float(skipped_steps)
+    return averaged
 
 
 def environment_payload(device: torch.device) -> dict[str, Any]:
@@ -237,12 +356,18 @@ def run_training(args: argparse.Namespace) -> Path:
     config = resolve_cli(embed_source_fingerprints(load_config(args.config)), args)
     device, rank, world_size, local_rank = initialize_distributed(str(config["device"]))
     seed_everything(int(config["seed"]) + rank, bool(config["deterministic"]))
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = (
-        args.resume.resolve().parent
-        if args.resume is not None
-        else Path(config["runs_root"]) / "train" / f"{config['run_name']}_{timestamp}"
-    )
+    if rank == 0:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        selected_run_dir = (
+            args.resume.resolve().parent
+            if args.resume is not None
+            else args.output.resolve() if args.output is not None
+            else Path(config["runs_root"]) / "train" / f"{config['run_name']}_{timestamp}"
+        )
+        run_dir_value: str | None = str(selected_run_dir)
+    else:
+        run_dir_value = None
+    run_dir = Path(broadcast_object(run_dir_value, source=0))
     run_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(run_dir / "train.log" if rank == 0 else None)
     LOGGER.info("Resolved config: %s", jsonable_config(config))
@@ -270,11 +395,7 @@ def run_training(args: argparse.Namespace) -> Path:
             device_ids=[local_rank] if device.type == "cuda" else None,
             find_unused_parameters=False,
         )
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(config["optimizer"]["learning_rate"]),
-        weight_decay=float(config["optimizer"]["weight_decay"]),
-    )
+    optimizer = build_optimizer(model, config)
     epochs = int(config["training"]["epochs"])
     accumulation = int(config["training"]["gradient_accumulation_steps"])
     effective_train_batches = min(
@@ -283,19 +404,29 @@ def run_training(args: argparse.Namespace) -> Path:
     steps_per_epoch = math.ceil(effective_train_batches / accumulation)
     total_steps = max(1, epochs * steps_per_epoch)
     warmup_steps = int(config["scheduler"]["warmup_epochs"]) * steps_per_epoch
-    minimum_ratio = float(config["scheduler"]["minimum_learning_rate"]) / float(
-        config["optimizer"]["learning_rate"]
+    scheduler = build_scheduler(optimizer, config, total_steps, warmup_steps)
+    amp_enabled, amp_dtype, scaler_enabled = resolve_amp(
+        device, bool(config["training"]["amp"]),
+        str(config["training"].get("amp_dtype", "float16")),
     )
-    scheduler = cosine_warmup_scheduler(optimizer, total_steps, warmup_steps, minimum_ratio)
-    amp_enabled = bool(config["training"]["amp"]) and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
+    ema = ModelEMA(
+        model, float(config["training"].get("ema_decay", 0.999)),
+        int(config["training"].get("ema_warmup_steps", 0)),
+    ) if bool(config["training"].get("ema_enabled", False)) else None
     criterion = CompositeFloodDepthLoss(
         config["loss"], prior, depth_bins, normalizer.train_depth_bins
     )
     fingerprint = dataset_fingerprint(config)
     monitor = str(config["training"]["best_metric"])
-    start_epoch, best_metric = 0, float("inf")
+    start_epoch, best_metric, patience = 0, float("inf"), 0
     if args.resume is not None:
+        current_identity = training_identity_sha256(
+            jsonable_config(config), fingerprint, version=2
+        )
+        legacy_identity = training_identity_sha256(
+            jsonable_config(config), fingerprint, version=1
+        )
         checkpoint = load_checkpoint(
             args.resume,
             model,
@@ -306,7 +437,11 @@ def run_training(args: argparse.Namespace) -> Path:
             allow_fingerprint_mismatch=args.allow_fingerprint_mismatch,
             restore_rng=True,
             map_location=device,
+            expected_training_identity_sha256=current_identity,
+            expected_legacy_training_identity_sha256=legacy_identity,
         )
+        if ema is not None and checkpoint.get("ema") is not None:
+            ema.load_state_dict(checkpoint["ema"])
         checkpoint_monitor = str(
             checkpoint.get("extra", {}).get("best_metric_name", "event_macro_mae")
         )
@@ -347,6 +482,20 @@ def run_training(args: argparse.Namespace) -> Path:
             )
         start_epoch = int(checkpoint["epoch"]) + 1
         best_metric = float(checkpoint["best_metric"])
+        patience = int(checkpoint.get("extra", {}).get("early_stop_patience", -1))
+        if patience < 0:
+            patience = infer_legacy_patience(
+                run_dir / "metrics_by_epoch.csv",
+                int(checkpoint["epoch"]),
+                monitor,
+                str(config["training"].get("best_weights", "raw")),
+                float(config["training"].get("min_delta", 0.0)),
+            )
+        if world_size > 1:
+            derived_seed = int(config["seed"]) + rank + 1_000_003 * start_epoch
+            seed_everything(derived_seed, bool(config["deterministic"]))
+            train_loader.generator.manual_seed(derived_seed)
+            val_loader.generator.manual_seed(derived_seed + 1)
         LOGGER.info("Resumed %s at epoch %d", args.resume, start_epoch)
 
     writer = SummaryWriter(run_dir / "tensorboard") if rank == 0 and config["logging"]["tensorboard"] else None
@@ -367,12 +516,22 @@ def run_training(args: argparse.Namespace) -> Path:
                 "best_metric": monitor,
                 "depth_stratification_edges_m": depth_bins,
                 "primary_depth_stratification_edges_m": normalizer.train_depth_bins,
+                "resolved_model_bands": config["dataset"].get("resolved_model_bands"),
+                "amp_dtype": str(amp_dtype),
             },
         )
-    patience = 0
     start_time = time.perf_counter()
     try:
         for epoch in range(start_epoch, epochs):
+            if (
+                epoch >= int(config["training"].get("minimum_epochs", 0))
+                and patience >= int(config["training"]["early_stop_patience"])
+            ):
+                LOGGER.info(
+                    "Resume checkpoint already satisfies early stopping at epoch %d",
+                    epoch - 1,
+                )
+                break
             train_metrics = train_one_epoch(
                 model,
                 train_loader,
@@ -385,27 +544,90 @@ def run_training(args: argparse.Namespace) -> Path:
                 accumulation,
                 float(config["training"]["grad_clip_norm"]),
                 amp_enabled,
+                amp_dtype,
                 args.max_train_batches,
                 run_dir,
                 rank,
+                ema,
+                int(config["logging"]["log_every_steps"]),
+                bool(config["logging"]["csv"]),
             )
-            val_summary, _, _, _ = evaluate_loader(
-                model,
-                val_loader,
-                device,
-                depth_bins,
-                primary_depth_bins=normalizer.train_depth_bins,
-                criterion=criterion,
-                epoch=epoch,
-                max_batches=args.max_val_batches,
-                progress=rank == 0,
+            validation_interval = max(
+                1, int(config["training"].get("validation_interval", 1))
             )
-            if monitor not in val_summary:
+            should_validate = (
+                (epoch + 1) % validation_interval == 0 or epoch + 1 == epochs
+            )
+            if not should_validate:
+                if rank == 0:
+                    if bool(config["checkpoint"]["save_last"]):
+                        save_checkpoint(
+                            run_dir / "last.pth",
+                            model,
+                            optimizer,
+                            scheduler,
+                            scaler,
+                            epoch,
+                            best_metric,
+                            jsonable_config(config),
+                            fingerprint,
+                            extra={
+                                "total_parameters": total_parameters,
+                                "positive_prior": prior,
+                                "best_metric_name": monitor,
+                                "depth_stratification_edges_m": depth_bins,
+                                "primary_depth_stratification_edges_m": normalizer.train_depth_bins,
+                                "early_stop_patience": patience,
+                            },
+                            ema=ema,
+                        )
+                    LOGGER.info(
+                        "epoch=%d train_loss=%.5f validation=skipped interval=%d",
+                        epoch,
+                        train_metrics["total"],
+                        validation_interval,
+                    )
+                continue
+            val_summary = None
+            ema_summary = None
+            if rank == 0:
+                evaluation_model = model.module if hasattr(model, "module") else model
+                val_summary, _, _, _ = evaluate_loader(
+                    evaluation_model,
+                    val_loader,
+                    device,
+                    depth_bins,
+                    primary_depth_bins=normalizer.train_depth_bins,
+                    criterion=criterion,
+                    epoch=epoch,
+                    max_batches=args.max_val_batches,
+                    progress=True,
+                    amp_enabled=amp_enabled,
+                    amp_dtype=amp_dtype,
+                )
+                if ema is not None:
+                    with ema.swap_in(model):
+                        ema_summary, _, _, _ = evaluate_loader(
+                            evaluation_model, val_loader, device, depth_bins,
+                            primary_depth_bins=normalizer.train_depth_bins,
+                            criterion=criterion, epoch=epoch,
+                            max_batches=args.max_val_batches, progress=True,
+                            amp_enabled=amp_enabled, amp_dtype=amp_dtype,
+                        )
+            val_summary = broadcast_object(val_summary, source=0)
+            ema_summary = broadcast_object(ema_summary, source=0)
+            selected_summary = (
+                ema_summary if str(config["training"].get("best_weights", "raw")) == "ema" and ema_summary is not None
+                else val_summary
+            )
+            if monitor not in selected_summary:
                 raise KeyError(
                     f"Configured best metric {monitor!r} is absent from validation summary"
                 )
-            metric = float(val_summary[monitor])
-            improved = metric < best_metric
+            metric = float(selected_summary[monitor])
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(metric)
+            improved = metric < best_metric - float(config["training"].get("min_delta", 0.0))
             if improved:
                 best_metric, patience = metric, 0
             else:
@@ -415,6 +637,7 @@ def run_training(args: argparse.Namespace) -> Path:
                     "epoch": epoch,
                     **{f"train_{key}": value for key, value in train_metrics.items()},
                     **{f"val_{key}": value for key, value in val_summary.items()},
+                    **({f"val_ema_{key}": value for key, value in ema_summary.items()} if ema_summary else {}),
                     "learning_rate": optimizer.param_groups[0]["lr"],
                     f"best_{monitor}": best_metric,
                 }
@@ -438,11 +661,14 @@ def run_training(args: argparse.Namespace) -> Path:
                         "best_metric_name": monitor,
                         "depth_stratification_edges_m": depth_bins,
                         "primary_depth_stratification_edges_m": normalizer.train_depth_bins,
+                        "early_stop_patience": patience,
                     },
                 )
-                save_checkpoint(run_dir / "last.pth", **common)
+                if bool(config["checkpoint"]["save_last"]):
+                    save_checkpoint(run_dir / "last.pth", ema=ema, **common)
                 if improved:
-                    save_checkpoint(run_dir / "best.pth", **common)
+                    if bool(config["checkpoint"]["save_best"]):
+                        save_checkpoint(run_dir / "best.pth", ema=ema, **common)
                 LOGGER.info(
                     "epoch=%d train_loss=%.5f val_%s=%.5f best=%.5f",
                     epoch,
@@ -451,7 +677,10 @@ def run_training(args: argparse.Namespace) -> Path:
                     metric,
                     best_metric,
                 )
-            if patience >= int(config["training"]["early_stop_patience"]):
+            if (
+                epoch + 1 >= int(config["training"].get("minimum_epochs", 0))
+                and patience >= int(config["training"]["early_stop_patience"])
+            ):
                 LOGGER.info("Early stopping at epoch %d", epoch)
                 break
     finally:
@@ -485,6 +714,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--allow-fingerprint-mismatch", action="store_true")
+    parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
 

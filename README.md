@@ -177,6 +177,67 @@ event-depth reduction was numerically identical to a per-raster reduction. The g
 therefore comes from aligning checkpoint selection with deployment accuracy, not from
 learning event-specific behavior.
 
+Hydro-v13 is available as an explicit engineering candidate while the repository's
+default configuration remains Hydro-v12. It resolves model inputs by exact contract
+band names, reads only the selected continuous raster bands, and records the resolved
+`BandSpec` in configuration/checkpoint metadata. The validated compact configuration
+uses VV/VH before and during the event, their two deltas plus `anomaly_raw`, incidence
+angles as conditioning, B3/B8/B11 at both times, NDWI/MNDWI changes, DSM elevation,
+and slope. Its efficient cross-state encoders, content-aware sensor/terrain fusion,
+multi-head terrain Graph-KAN, gated FPN decoder, deep supervision, and separate task
+heads are configured in `configs/pa_hydrokan/subset150_v13_final.xml`.
+
+To define another input view, copy one of the v13 band configurations and edit only
+the exact names under `dataset.model_bands`; missing or duplicate names fail early.
+Legacy configurations without `model_bands` retain the full-band behavior.
+
+```bash
+conda run --no-capture-output -n flood-depth \
+  python tools/train.py \
+  --config configs/pa_hydrokan/subset150_v13_final.xml \
+  --device auto --seed 20260831 \
+  --output runs/optimization/hydrov13/final_seed_20260831
+
+conda run --no-capture-output -n flood-depth \
+  python tools/evaluate.py \
+  --config configs/pa_hydrokan/subset150_v13_final.xml \
+  --checkpoint runs/optimization/hydrov13/final_seed_20260831/best.pth \
+  --weights raw --split val --device auto \
+  --output runs/optimization/hydrov13/final_validation_raw
+
+conda run --no-capture-output -n flood-depth \
+  python tools/evaluate.py \
+  --config configs/pa_hydrokan/subset150_v13_final.xml \
+  --checkpoint runs/optimization/hydrov13/final_seed_20260831/best.pth \
+  --weights ema --split val --device auto \
+  --output runs/optimization/hydrov13/final_validation_ema
+
+conda run --no-capture-output -n flood-depth \
+  python tools/analyze_band_importance.py \
+  --config configs/pa_hydrokan/subset150_main.xml \
+  --checkpoint runs/train/pa_hydrokan_subset150_hydrov12_raster_depth_balance_20260901_153904/best.pth \
+  --split val --device auto \
+  --output artifacts/optimization/hydrov13/band_mask_importance
+
+conda run --no-capture-output -n flood-depth \
+  python tools/profile_model.py \
+  --config configs/pa_hydrokan/subset150_v13_final.xml \
+  --device auto --batch-size 4 --iterations 50 \
+  --output artifacts/optimization/hydrov13/final_model_profile.json
+
+conda run --no-capture-output -n flood-depth \
+  python tools/train.py \
+  --config configs/pa_hydrokan/subset150_v13_final.xml \
+  --device auto \
+  --resume runs/optimization/hydrov13/final_seed_20260831/last.pth
+```
+
+Resume now checks a semantic training-identity hash in addition to source
+fingerprints. Changing the model, bands, reliability schema, loss, optimizer, or
+scheduler requires a new run; epochs, logging, workers, device, and output location
+remain runtime choices. Full measurements and candidate decisions are recorded in
+`docs/HYDRO_V13_ENGINEERING_REPORT.md`.
+
 ## Comparison models
 
 The `compare/` directory follows the engineering role of DEHCD-Net's comparison

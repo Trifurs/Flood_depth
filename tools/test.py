@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--max-batches", type=int)
+    parser.add_argument("--weights", choices=("raw", "ema"), default="raw")
     return parser.parse_args()
 
 
@@ -42,6 +43,7 @@ def main() -> int:
         output.resolve(),
         args.save_predictions,
         args.max_batches,
+        args.weights,
     )
     print(summary)
     return 0

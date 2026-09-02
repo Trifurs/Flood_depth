@@ -22,6 +22,7 @@ class KANLinear(nn.Module):
         out_features: int,
         grid_size: int = 8,
         spline_order: int = 3,
+        normalization: str = "legacy_layernorm",
     ) -> None:
         super().__init__()
         if in_features < 1 or out_features < 1 or grid_size < 2 or spline_order < 1:
@@ -30,6 +31,9 @@ class KANLinear(nn.Module):
         self.out_features = out_features
         self.grid_size = grid_size
         self.spline_order = spline_order
+        if normalization not in {"legacy_layernorm", "explicit_fixed_scaling"}:
+            raise ValueError(f"Unknown KAN normalization {normalization!r}")
+        self.normalization_mode = normalization
         internal = torch.linspace(-1.0, 1.0, grid_size + 1)[1:-1]
         knots = torch.cat(
             (
@@ -84,9 +88,18 @@ class KANLinear(nn.Module):
             raise ValueError(
                 f"KANLinear expected last dimension {self.in_features}, got {inputs.shape[-1]}"
             )
-        normalized = self.normalization(inputs)
+        normalized = (
+            self.normalization(inputs)
+            if self.normalization_mode == "legacy_layernorm"
+            else inputs
+        )
         bounded = torch.tanh(normalized)
         base = F.linear(F.silu(normalized), self.base_weight, self.base_bias)
-        basis = self.b_spline_basis(bounded)
-        spline = torch.einsum("...ik,oik->...o", basis, self.spline_coefficients)
-        return base + spline
+        # B-spline recurrence is sensitive to half-precision knot arithmetic.  It
+        # remains FP32 under autocast and is converted only after contraction.
+        with torch.autocast(device_type=inputs.device.type, enabled=False):
+            basis = self.b_spline_basis(bounded.float())
+            spline = torch.einsum(
+                "...ik,oik->...o", basis, self.spline_coefficients.float()
+            )
+        return base + spline.to(base.dtype)

@@ -298,13 +298,17 @@ def positive_depth_losses(
     underprediction_min_depth_m: float = 0.0,
     aggregation_mode: str = "auto",
     linear_loss: str = "smooth_l1",
+    depth_huber_beta_m: float = 1.0,
+    log_depth_huber_beta: float = 1.0,
 ) -> dict[str, torch.Tensor]:
     if underprediction_factor < 1.0:
         raise ValueError("underprediction_factor must be at least one")
     if underprediction_min_depth_m < 0.0:
         raise ValueError("underprediction_min_depth_m must be nonnegative")
     if linear_loss == "smooth_l1":
-        linear_pixels = F.smooth_l1_loss(positive_depth, target, reduction="none")
+        linear_pixels = F.smooth_l1_loss(
+            positive_depth, target, reduction="none", beta=depth_huber_beta_m
+        )
     elif linear_loss == "l1":
         linear_pixels = (positive_depth - target).abs()
     else:
@@ -323,7 +327,8 @@ def positive_depth_losses(
             linear_pixels.new_tensor(1.0),
         )
     log_pixels = F.smooth_l1_loss(
-        torch.log1p(positive_depth), torch.log1p(target.clamp_min(0.0)), reduction="none"
+        torch.log1p(positive_depth), torch.log1p(target.clamp_min(0.0)),
+        reduction="none", beta=log_depth_huber_beta
     )
     valid_aggregation_modes = {
         "auto",
@@ -399,7 +404,9 @@ def positive_depth_losses(
         if linear_loss == "l1":
             final_pixels = (final_depth - target).abs()
         else:
-            final_pixels = F.smooth_l1_loss(final_depth, target, reduction="none")
+            final_pixels = F.smooth_l1_loss(
+                final_depth, target, reduction="none", beta=depth_huber_beta_m
+            )
         final = reducer(final_pixels)
     else:
         final = linear.detach() * 0.0

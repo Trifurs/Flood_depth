@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from datasets.flooddepth_dataset import FloodDepthDataset, prepare_model_inputs
-from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
+from datasets.preprocessing import RELIABILITY_NAMES, RobustNormalizer, resolve_depth_stratification_bins
 from losses.composite_loss import CompositeFloodDepthLoss
 from metrics.aggregator import EvaluationAggregator
 from metrics.physical_metrics import (
@@ -36,6 +36,7 @@ from utils.raster_io import write_geotiff
 from utils.registry import build_model
 from utils.visualization import save_prediction_panel
 from datasets.contract import DatasetContract, sha256_file
+from datasets.band_selection import resolve_band_spec
 
 
 def dataset_fingerprint(config: dict[str, Any]) -> dict[str, str]:
@@ -56,6 +57,10 @@ def embed_source_fingerprints(config: dict[str, Any]) -> dict[str, Any]:
     config["dataset"]["normalization_sha256"] = sha256_file(
         Path(config["dataset"]["train_stats"])
     )
+    config["dataset"]["resolved_model_bands"] = resolve_band_spec(
+        config, contract
+    ).as_dict()
+    config["dataset"]["resolved_reliability_schema"] = list(RELIABILITY_NAMES)
     return config
 
 
@@ -84,6 +89,8 @@ def evaluate_loader(
     output_dir: Path | None = None,
     save_predictions: bool = False,
     progress: bool = True,
+    amp_enabled: bool = False,
+    amp_dtype: torch.dtype | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     model.eval()
     aggregator = EvaluationAggregator(train_depth_bins, primary_depth_bins)
@@ -95,8 +102,11 @@ def evaluate_loader(
         if max_batches is not None and batch_index >= max_batches:
             break
         batch = move_to_device(cpu_batch, device)
-        amp_enabled = device.type == "cuda"
-        with torch.autocast(device_type=device.type, enabled=amp_enabled):
+        with torch.autocast(
+            device_type=device.type,
+            enabled=amp_enabled and device.type == "cuda",
+            dtype=amp_dtype,
+        ):
             outputs = model(prepare_model_inputs(batch))
             if criterion is not None:
                 loss, components = criterion(outputs, batch, epoch)
@@ -138,8 +148,8 @@ def evaluate_loader(
                 scale,
                 positive_mask,
                 support,
-                batch["reliability"][sample_index, 9:10].detach().cpu().numpy(),
-                batch["reliability"][sample_index, [0, 2, 3]].mean(dim=0, keepdim=True).detach().cpu().numpy(),
+                batch["reliability"][sample_index, RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference"):RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference") + 1].detach().cpu().numpy(),
+                batch["reliability"][sample_index, [RELIABILITY_NAMES.index(name) for name in ("s1_event_observation_count_z", "s2_pre_clear_observation_count_z", "s2_event_clear_observation_count_z")]].mean(dim=0, keepdim=True).detach().cpu().numpy(),
             )
             if "event_depth_scale" in outputs:
                 event_depth_scale = float(
@@ -160,7 +170,7 @@ def evaluate_loader(
             )
             positive_output_valid = positive_mask & output_valid_np
             day_difference_np = (
-                batch["reliability"][sample_index, 9:10].detach().cpu().numpy()
+                batch["reliability"][sample_index, RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference"):RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference") + 1].detach().cpu().numpy()
             )
             row["positive_region_wse_laplacian"] = local_wse_laplacian(
                 prediction, z_hyd, positive_output_valid
@@ -289,6 +299,7 @@ def run_evaluation(
     output_dir: Path,
     save_predictions: bool,
     max_batches: int | None = None,
+    weights: str = "raw",
 ) -> dict[str, Any]:
     config = embed_source_fingerprints(load_config(config_path))
     if split not in {"val", "test"}:
@@ -297,8 +308,11 @@ def run_evaluation(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(device_name)
+    contract = DatasetContract.load(config["dataset"]["contract"])
+    band_spec = resolve_band_spec(config, contract)
     dataset = FloodDepthDataset(
-        config["dataset"]["contract"], config["dataset"]["train_stats"], split
+        config["dataset"]["contract"], config["dataset"]["train_stats"], split,
+        band_spec=band_spec,
     )
     loader = DataLoader(
         dataset,
@@ -314,6 +328,13 @@ def run_evaluation(
         expected_fingerprint=dataset_fingerprint(config),
         map_location=device,
     )
+    if weights == "ema":
+        ema_state = checkpoint.get("ema_model")
+        if ema_state is None:
+            raise ValueError("--weights ema requested but checkpoint has no EMA state")
+        model.load_state_dict(ema_state, strict=True)
+    elif weights != "raw":
+        raise ValueError("weights must be raw or ema")
     checkpoint_epoch = int(checkpoint.get("epoch", 0))
     normalizer = RobustNormalizer(Path(config["dataset"]["train_stats"]), dataset.contract)
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
@@ -334,8 +355,16 @@ def run_evaluation(
         max_batches=max_batches,
         output_dir=output_dir,
         save_predictions=save_predictions,
+        amp_enabled=bool(config["training"].get("amp", False)),
+        amp_dtype=(
+            torch.bfloat16
+            if str(config["training"].get("amp_dtype", "auto")) in {"auto", "bfloat16"}
+            and device.type == "cuda" and torch.cuda.is_bf16_supported()
+            else torch.float16
+        ),
     )
     summary["checkpoint_epoch"] = checkpoint_epoch
+    summary["weights"] = weights
     atomic_write_json(output_dir / "summary.json", summary)
     atomic_write_json(output_dir / "resolved_config.json", jsonable_config(config))
     write_rows(output_dir / "metrics_by_sample.csv", samples)
@@ -353,6 +382,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--max-batches", type=int)
+    parser.add_argument("--weights", choices=("raw", "ema"), default="raw")
     return parser.parse_args()
 
 
@@ -368,6 +398,7 @@ def main() -> int:
         output.resolve(),
         args.save_predictions,
         args.max_batches,
+        args.weights,
     )
     print(summary)
     return 0

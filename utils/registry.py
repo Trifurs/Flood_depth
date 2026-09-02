@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from torch import nn
 
 from models.pa_hydrokan import build_pa_hydrokan
+from models.pa_hydrokan_v13 import build_pa_hydrokan_v13
 
 
 def _builders():
@@ -18,6 +19,7 @@ def _builders():
 
     return {
         "pa_hydrokan": build_pa_hydrokan,
+        "pa_hydrokan_v13": build_pa_hydrokan_v13,
         "dlsim_linknet_adapted": build_dlsim_linknet,
         "dlsim_attention_unet_adapted": build_dlsim_attention_unet,
     }

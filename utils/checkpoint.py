@@ -10,10 +10,42 @@ from typing import Any, Mapping
 
 import numpy as np
 import torch
+import hashlib
+import json
 
 
 class CheckpointError(RuntimeError):
     """Raised for incompatible or incomplete checkpoint state."""
+
+
+def training_identity_sha256(
+    resolved_config: Mapping[str, Any],
+    dataset_fingerprint: Mapping[str, str],
+    *,
+    version: int = 2,
+) -> str:
+    """Hash every semantic field that must remain fixed across resume.
+
+    Version 1 reproduces checkpoints written during the initial Hydro-v13 run.
+    Version 2 additionally names the reliability schema explicitly; older files
+    remain resumable only when their original v1 identity matches exactly.
+    """
+
+    identity_fields = {
+        key: resolved_config.get(key)
+        for key in ("model", "loss", "optimizer", "scheduler")
+    }
+    dataset_config = resolved_config.get("dataset", {})
+    if isinstance(dataset_config, Mapping):
+        identity_fields["model_bands"] = dataset_config.get("resolved_model_bands")
+        if version >= 2:
+            identity_fields["reliability_schema"] = dataset_config.get(
+                "resolved_reliability_schema"
+            )
+    identity_fields["dataset_fingerprint"] = dict(dataset_fingerprint)
+    return hashlib.sha256(
+        json.dumps(identity_fields, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def checkpoint_depth_output_semantics(checkpoint: Mapping[str, Any]) -> str:
@@ -90,8 +122,12 @@ def save_checkpoint(
     resolved_config: Mapping[str, Any],
     dataset_fingerprint: Mapping[str, str],
     extra: Mapping[str, Any] | None = None,
+    ema: Any = None,
 ) -> None:
     unwrapped = model.module if hasattr(model, "module") else model
+    identity_hash = training_identity_sha256(
+        resolved_config, dataset_fingerprint, version=2
+    )
     payload = {
         "model": unwrapped.state_dict(),
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
@@ -103,6 +139,10 @@ def save_checkpoint(
         "resolved_config": dict(resolved_config),
         "dataset_fingerprint": dict(dataset_fingerprint),
         "extra": dict(extra or {}),
+        "training_identity_sha256": identity_hash,
+        "training_identity_version": 2,
+        "ema": ema.state_dict() if ema is not None else None,
+        "ema_model": ema.model_state_dict() if ema is not None else None,
     }
     atomic_torch_save(payload, path)
 
@@ -118,6 +158,8 @@ def load_checkpoint(
     restore_rng: bool = False,
     map_location: str | torch.device = "cpu",
     adopt_checkpoint_output_semantics: bool = True,
+    expected_training_identity_sha256: str | None = None,
+    expected_legacy_training_identity_sha256: str | None = None,
 ) -> dict[str, Any]:
     checkpoint = torch.load(Path(path), map_location=map_location, weights_only=False)
     if expected_fingerprint is not None and dict(checkpoint.get("dataset_fingerprint", {})) != dict(
@@ -127,6 +169,20 @@ def load_checkpoint(
             raise CheckpointError(
                 "Dataset contract/manifest/normalization fingerprint differs from checkpoint; "
                 "refusing resume without the explicit dangerous override"
+            )
+    if expected_training_identity_sha256 is not None:
+        saved_identity = checkpoint.get("training_identity_sha256")
+        identity_version = int(checkpoint.get("training_identity_version", 1))
+        expected_identity = (
+            expected_training_identity_sha256
+            if identity_version >= 2
+            else expected_legacy_training_identity_sha256
+        )
+        if saved_identity is None or expected_identity is None or saved_identity != expected_identity:
+            raise CheckpointError(
+                "Training identity differs from checkpoint; model structure, BandSpec, "
+                "reliability schema, loss, optimizer, scheduler, and dataset semantics "
+                "must remain unchanged when resuming"
             )
     unwrapped = model.module if hasattr(model, "module") else model
     unwrapped.load_state_dict(checkpoint["model"], strict=True)

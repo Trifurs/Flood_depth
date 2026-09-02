@@ -12,6 +12,7 @@ GEOMETRIC_TOP_LEVEL = {
     "s1_t1",
     "s1_t2",
     "s1_change",
+    "s1_conditioning",
     "s1_qa",
     "s2_t1",
     "s2_t2",
@@ -54,14 +55,22 @@ class SynchronousAugment:
                 "s2_t2",
                 "s2_change",
             )
+            if modality == "s1" and "s1_conditioning" in sample:
+                keys = (*keys, "s1_conditioning")
             for key in keys:
                 sample[key] = torch.zeros_like(sample[key])
             validity_key = f"{modality}_valid"
             sample["validity"][validity_key] = torch.zeros_like(
                 sample["validity"][validity_key]
             )
-            reliability_index = 5 if modality == "s1" else 6
+            from datasets.preprocessing import RELIABILITY_NAMES
+
+            reliability_name = f"{modality}_valid"
+            reliability_index = RELIABILITY_NAMES.index(reliability_name)
             sample["reliability"][reliability_index].zero_()
+            sample["validity"]["output_valid"] = sample["validity"]["dem_valid"] * torch.maximum(
+                sample["validity"]["s1_valid"], sample["validity"]["s2_valid"]
+            )
             sample["metadata"]["modality_dropout"] = modality
         else:
             sample["metadata"]["modality_dropout"] = "none"

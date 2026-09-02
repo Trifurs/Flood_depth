@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from models.encoders import ConvNormAct, group_count
 from models.kan_layers import KANLinear
+from datasets.preprocessing import RELIABILITY_NAMES
 
 
 DIRECTIONS = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
@@ -81,7 +82,8 @@ class TerrainGraphKAN(nn.Module):
         z_hyd = _masked_pool(physical["z_hyd"], dem_valid_full, size)
         slope = _masked_pool(physical["slope"], dem_valid_full, size)
         barrier = _masked_pool(physical["z_barrier"], dem_valid_full, size)
-        time_difference = F.adaptive_avg_pool2d(reliability[:, 9:10], size)
+        day_index = RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference")
+        time_difference = F.adaptive_avg_pool2d(reliability[:, day_index : day_index + 1], size)
         sensor_reliability = modality_weights.max(dim=1, keepdim=True).values
         projected = self.feature_projection(features)
 

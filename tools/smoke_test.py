@@ -25,6 +25,7 @@ from utils.logging import setup_logging
 from utils.misc import atomic_write_json, move_to_device
 from utils.registry import build_model
 from utils.seed import seed_everything
+from utils.amp import resolve_amp
 
 
 def run_smoke(
@@ -33,9 +34,10 @@ def run_smoke(
     train_batches: int = 2,
     val_batches: int = 1,
     output_root: Path | None = None,
+    batch_size: int = 1,
 ) -> dict:
     config = embed_source_fingerprints(load_config(config_path))
-    config["training"]["batch_size"] = 1
+    config["training"]["batch_size"] = int(batch_size)
     config["training"]["num_workers"] = 0
     config["training"]["persistent_workers"] = False
     device = torch.device(
@@ -62,8 +64,11 @@ def run_smoke(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(1, train_batches)
     )
-    amp_enabled = bool(config["training"]["amp"]) and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    amp_enabled, amp_dtype, scaler_enabled = resolve_amp(
+        device, bool(config["training"]["amp"]),
+        str(config["training"].get("amp_dtype", "float16")),
+    )
+    scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     criterion = CompositeFloodDepthLoss(
         config["loss"],
         train_dataset.normalizer.positive_prior,
@@ -80,7 +85,7 @@ def run_smoke(
             break
         batch = move_to_device(cpu_batch, device)
         optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(device_type=device.type, enabled=amp_enabled):
+        with torch.autocast(device_type=device.type, enabled=amp_enabled, dtype=amp_dtype):
             outputs = model(prepare_model_inputs(batch))
             loss, _ = criterion(outputs, batch, epoch=0)
         if not torch.isfinite(loss):
@@ -121,7 +126,7 @@ def run_smoke(
     reloaded_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         reloaded_optimizer, T_max=max(1, train_batches)
     )
-    reloaded_scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    reloaded_scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     checkpoint = load_checkpoint(
         checkpoint_path,
         reloaded,
@@ -141,6 +146,8 @@ def run_smoke(
         max_batches=val_batches,
         output_dir=infer_dir,
         save_predictions=True,
+        amp_enabled=amp_enabled,
+        amp_dtype=amp_dtype,
     )
     if not samples:
         raise RuntimeError("Smoke validation produced no sample metrics")
@@ -154,6 +161,8 @@ def run_smoke(
         "device": str(device),
         "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
         "parameter_count": parameter_count,
+        "amp_enabled": amp_enabled,
+        "amp_dtype": str(amp_dtype),
         "train_batches": train_batches,
         "val_batches": val_batches,
         "train_losses": losses,
@@ -189,6 +198,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-batches", type=int, default=2)
     parser.add_argument("--val-batches", type=int, default=1)
     parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--batch-size", type=int, default=1)
     return parser.parse_args()
 
 
@@ -200,6 +210,7 @@ def main() -> int:
         args.train_batches,
         args.val_batches,
         args.output_root,
+        args.batch_size,
     )
     return 0
 

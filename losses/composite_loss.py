@@ -19,6 +19,8 @@ from losses.physics_losses import (
     weak_wse_laplacian_loss,
 )
 from losses.pu_loss import nnpu_logistic_loss
+from losses.multiscale_losses import auxiliary_depth_loss, masked_gradient_consistency_loss
+from datasets.preprocessing import RELIABILITY_NAMES
 
 
 def _event_ids(batch: Mapping[str, Any]) -> Sequence[str] | None:
@@ -55,6 +57,16 @@ class CompositeFloodDepthLoss(nn.Module):
         warmup = max(1, int(self.config["wse_warmup_epochs"]))
         if epoch < start:
             return 0.0
+        return target * min(1.0, (epoch - start + 1) / warmup)
+
+    def scheduled_weight(self, name: str, epoch: int) -> float:
+        target = float(self.config.get(f"lambda_{name}", 0.0))
+        start = int(self.config.get(f"{name}_start_epoch", 0))
+        warmup = int(self.config.get(f"{name}_warmup_epochs", 0))
+        if epoch < start:
+            return 0.0
+        if warmup <= 0:
+            return target
         return target * min(1.0, (epoch - start + 1) / warmup)
 
     def forward(
@@ -102,6 +114,8 @@ class CompositeFloodDepthLoss(nn.Module):
             float(self.config.get("depth_underprediction_min_m", 0.0)),
             aggregation_mode,
             str(self.config.get("depth_linear_loss", "smooth_l1")),
+            float(self.config.get("depth_huber_beta_m", 1.0)),
+            float(self.config.get("log_depth_huber_beta", 1.0)),
         )
         exceedance = event_depth_exceedance_loss(
             outputs["depth"],
@@ -133,8 +147,22 @@ class CompositeFloodDepthLoss(nn.Module):
             aggregation_mode,
         )
         components["uncertainty"] = uncertainty
+        gradient = masked_gradient_consistency_loss(
+            outputs.get("conditional_depth", outputs["depth"]), label, positive,
+            float(self.config.get("gradient_huber_beta_m", 0.1)),
+        )
+        components["gradient"] = gradient
+        auxiliary, auxiliary_terms = auxiliary_depth_loss(
+            outputs.get("auxiliary_depths", ()), label, positive,
+            self.config.get("auxiliary_depth_weights", ()),
+            float(self.config.get("depth_huber_beta_m", 1.0)),
+        )
+        components["auxiliary"] = auxiliary
+        for index, value in enumerate(auxiliary_terms):
+            components[f"auxiliary_{index}"] = value
         sensor_valid = torch.maximum(validity["s1_valid"], validity["s2_valid"])
-        day_difference = batch["reliability"][:, 9:10]
+        day_index = RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference")
+        day_difference = batch["reliability"][:, day_index : day_index + 1]
         wse_mode = str(self.config.get("wse_mode", "absolute_laplacian"))
         if wse_mode == "reference_gated_gradient":
             wse = reference_gated_wse_gradient_loss(
@@ -184,17 +212,38 @@ class CompositeFloodDepthLoss(nn.Module):
             )
         components["wse"] = wse
         effective_wse = self.wse_weight(epoch)
+        effective_pu = self.scheduled_weight("pu", epoch)
+        effective_unc = self.scheduled_weight("unc", epoch)
+        effective_gradient = self.scheduled_weight("gradient", epoch)
+        effective_auxiliary = self.scheduled_weight("auxiliary", epoch)
+        kan_magnitude = outputs.get("graph_diagnostics", {}).get(
+            "kan_coefficient_magnitude", total_zero := label.sum() * 0.0
+        )
+        kan_smoothness = outputs.get("graph_diagnostics", {}).get(
+            "kan_coefficient_smoothness", total_zero
+        )
+        components["kan_magnitude"] = kan_magnitude
+        components["kan_smoothness"] = kan_smoothness
+        effective_kan = self.scheduled_weight("kan", epoch)
         total = (
             float(self.config["lambda_depth"]) * components["depth"]
             + float(self.config.get("lambda_depth_bias", 0.0))
             * components["depth_bias"]
             + float(self.config.get("lambda_depth_exceedance", 0.0)) * exceedance
-            + float(self.config["lambda_pu"]) * components["nnpu"]
-            + float(self.config["lambda_unc"]) * uncertainty
+            + effective_pu * components["nnpu"]
+            + effective_unc * uncertainty
+            + effective_gradient * gradient
+            + effective_auxiliary * auxiliary
             + effective_wse * wse
+            + effective_kan * (kan_magnitude + kan_smoothness)
         )
         components["total"] = total
         components["wse_effective_weight"] = total.new_tensor(effective_wse)
+        components["pu_effective_weight"] = total.new_tensor(effective_pu)
+        components["unc_effective_weight"] = total.new_tensor(effective_unc)
+        components["gradient_effective_weight"] = total.new_tensor(effective_gradient)
+        components["auxiliary_effective_weight"] = total.new_tensor(effective_auxiliary)
+        components["kan_effective_weight"] = total.new_tensor(effective_kan)
         components["positive_pixels"] = total.new_tensor(float(positive.sum().item()))
         components["unlabeled_pixels"] = total.new_tensor(float(unlabeled.sum().item()))
         return total, components

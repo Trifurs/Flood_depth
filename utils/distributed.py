@@ -6,6 +6,7 @@ import os
 
 import torch
 import torch.distributed as dist
+from typing import Any, Mapping
 
 
 def initialize_distributed(device_preference: str = "auto") -> tuple[torch.device, int, int, int]:
@@ -37,6 +38,37 @@ def barrier() -> None:
         dist.barrier()
 
 
+def broadcast_object(value: Any, source: int = 0) -> Any:
+    """Broadcast a small Python control object, with a single-process no-op."""
+
+    if not dist.is_initialized():
+        return value
+    payload = [value if dist.get_rank() == source else None]
+    dist.broadcast_object_list(payload, src=source)
+    return payload[0]
+
+
+def reduce_weighted_metrics(
+    metrics: Mapping[str, float], sample_count: int, device: torch.device
+) -> dict[str, float]:
+    """All-reduce metric numerators and their sample denominator."""
+
+    if not dist.is_initialized():
+        return dict(metrics)
+    names = sorted(metrics)
+    numerators = [float(metrics[name]) * sample_count for name in names]
+    values = torch.tensor(
+        [*numerators, float(sample_count)], device=device, dtype=torch.float64
+    )
+    dist.all_reduce(values, op=dist.ReduceOp.SUM)
+    denominator = max(float(values[-1].item()), 1.0)
+    return {
+        name: float(values[index].item()) / denominator
+        for index, name in enumerate(names)
+    }
+
+
 def cleanup_distributed() -> None:
     if dist.is_initialized():
+        dist.barrier()
         dist.destroy_process_group()

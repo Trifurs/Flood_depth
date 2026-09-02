@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import Dataset
 
 from datasets.contract import DatasetContract, MODEL_CONTINUOUS_GROUPS, ensure_within
+from datasets.band_selection import BandSpec
 from datasets.preprocessing import RELIABILITY_NAMES, RobustNormalizer
 
 
@@ -35,6 +36,7 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         split: str,
         transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         verify_fingerprints: bool = True,
+        band_spec: BandSpec | None = None,
     ) -> None:
         if split not in {"train", "val", "test"}:
             raise ValueError(f"Invalid split: {split}")
@@ -44,6 +46,7 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         self.normalizer = RobustNormalizer(Path(stats_path), self.contract)
         self.split = split
         self.transform = transform
+        self.band_spec = band_spec or BandSpec.resolve(self.contract, None)
         with self.contract.manifest_path.open("r", encoding="utf-8-sig", newline="") as handle:
             self.rows = [row for row in csv.DictReader(handle) if row["split"] == split]
         expected = int(self.contract.payload["sample_counts"][split])
@@ -60,7 +63,9 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         column = str(self.contract.group(group)["path_column"])
         return ensure_within(self.contract.dataset_root / row[column], self.contract.dataset_root)
 
-    def _read(self, row: dict[str, str], group: str) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    def _read(
+        self, row: dict[str, str], group: str, indexes: tuple[int, ...] | None = None
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         path = self._path(row, group)
         expected = self.contract.group(group)
         with rasterio.open(path) as dataset:
@@ -69,8 +74,9 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
                 raise DatasetIntegrityError(
                     f"Band descriptions changed for {path}: {descriptions} != {expected['band_descriptions']}"
                 )
-            array = dataset.read(masked=False)
-            masks = dataset.read_masks() > 0
+            rasterio_indexes = None if indexes is None else [index + 1 for index in indexes]
+            array = dataset.read(indexes=rasterio_indexes, masked=False)
+            masks = dataset.read_masks(indexes=rasterio_indexes) > 0
             masks &= np.isfinite(array)
             if dataset.nodata is not None:
                 if np.isnan(dataset.nodata):
@@ -109,7 +115,14 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         metadata_by_group: dict[str, dict[str, Any]] = {}
         reference_grid: tuple[Any, ...] | None = None
         for group in self.contract.payload["raster_groups"]:
-            array, valid, metadata = self._read(row, group)
+            selected_indexes = (
+                self.band_spec.read_indexes(self.contract, group)
+                if group in MODEL_CONTINUOUS_GROUPS and not (
+                    group == "terrain"  # raw terrain/physics requires both available bands
+                )
+                else None
+            )
+            array, valid, metadata = self._read(row, group, selected_indexes)
             if reference_grid is None:
                 reference_grid = metadata["grid"]
             elif metadata["grid"] != reference_grid:
@@ -135,9 +148,13 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
 
         continuous: dict[str, np.ndarray] = {}
         for group in MODEL_CONTINUOUS_GROUPS:
-            descriptions = list(self.contract.group(group)["band_descriptions"])
+            descriptions = list(self.band_spec.names(group))
+            read_indexes = self.band_spec.read_indexes(self.contract, group)
+            positions = [read_indexes.index(index) for index in self.band_spec.indexes(group)]
+            selected_array = arrays[group][positions]
+            selected_validity = validity[group][positions]
             continuous[group] = self.normalizer.continuous(
-                group, descriptions, arrays[group], validity[group]
+                group, descriptions, selected_array, selected_validity
             )
         terrain_raw = np.where(validity["terrain"], arrays["terrain"], 0.0).astype(np.float32)
         # Raw Sentinel-1 dB values are exposed only inside the dedicated extent
@@ -145,6 +162,9 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         # therefore cannot receive these extra tensors accidentally.  The published
         # AI4G flood-change thresholds are defined in dB, so reconstructing them from
         # normalized/clipped model channels would be scientifically ambiguous.
+        # Extent consumers historically used this namespace.  For selected-band
+        # depth runs it contains only actually-read S1 bands; the depth model never
+        # receives it through ``prepare_model_inputs``.
         s1_t1_raw = np.where(validity["s1_t1"], arrays["s1_t1"], 0.0).astype(np.float32)
         s1_t2_raw = np.where(validity["s1_t2"], arrays["s1_t2"], 0.0).astype(np.float32)
         s1_pair_valid = np.logical_and.reduce(
@@ -228,6 +248,20 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
             axis=0,
         ).astype(np.float32)
 
+        conditioning_parts: list[np.ndarray] = []
+        for source_group, source_index in self.band_spec.conditioning_sources(self.contract):
+            read_indexes = self.band_spec.read_indexes(self.contract, source_group)
+            position = read_indexes.index(source_index)
+            name = str(self.contract.group(source_group)["band_descriptions"][source_index])
+            conditioning_parts.append(
+                self.normalizer.continuous(
+                    source_group,
+                    [name],
+                    arrays[source_group][position : position + 1],
+                    validity[source_group][position : position + 1],
+                )
+            )
+
         sample: dict[str, Any] = {
             "s1_t1": torch.from_numpy(continuous["s1_t1"]),
             "s1_t2": torch.from_numpy(continuous["s1_t2"]),
@@ -271,8 +305,13 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
                 "height": metadata_by_group["label"]["height"],
                 "label_path": metadata_by_group["label"]["path"],
                 "reliability_names": RELIABILITY_NAMES,
+                "resolved_model_bands": self.band_spec.as_dict(),
             },
         }
+        if conditioning_parts:
+            sample["s1_conditioning"] = torch.from_numpy(
+                np.concatenate(conditioning_parts, axis=0).astype(np.float32)
+            )
         return self.transform(sample) if self.transform is not None else sample
 
 
@@ -298,9 +337,12 @@ def prepare_model_inputs(batch: dict[str, Any]) -> dict[str, Any]:
     validity = batch.get("validity")
     if not isinstance(validity, dict):
         raise KeyError("Batch has no validity mapping")
-    return {
+    result = {
         **{key: batch[key] for key in MODEL_INPUT_KEYS},
         "s1_valid": validity["s1_valid"],
         "s2_valid": validity["s2_valid"],
         "dem_valid": validity["dem_valid"],
     }
+    if "s1_conditioning" in batch:
+        result["s1_conditioning"] = batch["s1_conditioning"]
+    return result

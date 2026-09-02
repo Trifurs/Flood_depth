@@ -1,0 +1,1 @@
+<?xml version="1.0"?><config><include path="../subset150_v13_compact.xml"/><run_name type="str">v13_screen_no_deep_supervision</run_name><model><deep_supervision_enabled type="bool">false</deep_supervision_enabled></model></config>

@@ -16,6 +16,8 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from datasets.flooddepth_dataset import FloodDepthDataset
+from datasets.band_selection import resolve_band_spec
+from datasets.contract import DatasetContract
 from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
 from losses.composite_loss import CompositeFloodDepthLoss
 from tools.evaluate import dataset_fingerprint, embed_source_fingerprints, evaluate_loader
@@ -29,9 +31,13 @@ from utils.registry import build_model
 def locate_sample(config: dict, requested: str) -> tuple[FloodDepthDataset, int]:
     requested_path = Path(requested).expanduser()
     requested_stem = requested_path.stem if requested_path.suffix else requested
+    band_spec = resolve_band_spec(
+        config, DatasetContract.load(config["dataset"]["contract"])
+    )
     for split in ("train", "val", "test"):
         dataset = FloodDepthDataset(
-            config["dataset"]["contract"], config["dataset"]["train_stats"], split
+            config["dataset"]["contract"], config["dataset"]["train_stats"], split,
+            band_spec=band_spec,
         )
         for index, row in enumerate(dataset.rows):
             if row["sample_id"] == requested or row["sample_id"] == requested_stem or Path(
@@ -52,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--save-geotiff", action="store_true")
     parser.add_argument("--save-visualization", action="store_true")
+    parser.add_argument("--weights", choices=("raw", "ema"), default="raw")
     return parser.parse_args()
 
 
@@ -64,12 +71,16 @@ def main() -> int:
         "cuda" if args.device == "auto" and torch.cuda.is_available() else "cpu" if args.device == "auto" else args.device
     )
     model = build_model(config).to(device)
-    load_checkpoint(
+    checkpoint = load_checkpoint(
         args.checkpoint,
         model,
         expected_fingerprint=dataset_fingerprint(config),
         map_location=device,
     )
+    if args.weights == "ema":
+        if checkpoint.get("ema_model") is None:
+            raise ValueError("--weights ema requested but checkpoint has no EMA state")
+        model.load_state_dict(checkpoint["ema_model"], strict=True)
     loader = DataLoader(Subset(dataset, [index]), batch_size=1, shuffle=False)
     normalizer = RobustNormalizer(Path(config["dataset"]["train_stats"]), dataset.contract)
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
