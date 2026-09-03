@@ -149,6 +149,8 @@ class SynchronousAugment:
                 sample["metadata"]["modality_dropout"] = modality
                 sample["metadata"]["dropout_type"] = "sensor_missing_simulation"
                 return sample
+            sample["metadata"]["modality_dropout"] = "none"
+            sample["metadata"]["dropout_type"] = "none"
         elif torch.rand(()) < float(self.feature_dropout_probability):
             modality = "s1" if torch.rand(()) < 0.5 else "s2"
             self._zero_features(sample, modality)

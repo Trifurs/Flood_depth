@@ -125,7 +125,10 @@ class TaskHead(nn.Module):
 
 class SeparateFloodDepthHeads(nn.Module):
     def __init__(self, channels: int, groups: int, epsilon: float, maximum: float,
-                 semantics: str = "conditional_positive_v2") -> None:
+                 semantics: str = "conditional_positive_v2",
+                 depth_initialization_bias: float | None = None,
+                 support_backbone_gradient: bool = True,
+                 uncertainty_backbone_gradient: bool = True) -> None:
         super().__init__()
         if semantics != "conditional_positive_v2":
             raise ValueError("Hydro-v13 supports conditional_positive_v2")
@@ -134,16 +137,26 @@ class SeparateFloodDepthHeads(nn.Module):
             TaskHead(channels, groups), TaskHead(channels, groups), TaskHead(channels, groups)
         )
         self.epsilon, self.maximum = float(epsilon), float(maximum)
+        self.support_backbone_gradient = bool(support_backbone_gradient)
+        self.uncertainty_backbone_gradient = bool(uncertainty_backbone_gradient)
+        if depth_initialization_bias is not None:
+            if not torch.isfinite(torch.tensor(float(depth_initialization_bias))):
+                raise ValueError("depth_initialization_bias must be finite")
+            final = self.depth_head.trunk[-1]
+            assert isinstance(final, nn.Conv2d)
+            nn.init.constant_(final.bias, float(depth_initialization_bias))
 
     def set_depth_output_semantics(self, value: str) -> None:
         if value != "conditional_positive_v2":
             raise ValueError("Hydro-v13 checkpoint must use conditional_positive_v2")
 
     def forward(self, features):
-        support_logits = self.support_head(features)
+        support_features = features if self.support_backbone_gradient else features.detach()
+        support_logits = self.support_head(support_features)
         conditional = F.softplus(self.depth_head(features))
         support = torch.sigmoid(support_logits)
-        scale = self.epsilon + self.maximum * torch.sigmoid(self.uncertainty_head(features))
+        uncertainty_features = features if self.uncertainty_backbone_gradient else features.detach()
+        scale = self.epsilon + self.maximum * torch.sigmoid(self.uncertainty_head(uncertainty_features))
         expected = support * conditional
         return {"depth": conditional, "conditional_depth": conditional,
                 "positive_depth": conditional, "expected_depth": expected,

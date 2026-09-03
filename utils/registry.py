@@ -9,6 +9,7 @@ from torch import nn
 from models.pa_hydrokan import build_pa_hydrokan
 from models.pa_hydrokan_v13 import build_pa_hydrokan_v13
 from models.pa_hydrokan_v13_1 import build_pa_hydrokan_v13_1
+from models.pa_hydrokan_v13_2 import build_pa_hydrokan_v13_2
 
 
 def _builders():
@@ -22,6 +23,7 @@ def _builders():
         "pa_hydrokan": build_pa_hydrokan,
         "pa_hydrokan_v13": build_pa_hydrokan_v13,
         "pa_hydrokan_v13_1": build_pa_hydrokan_v13_1,
+        "pa_hydrokan_v13_2": build_pa_hydrokan_v13_2,
         "dlsim_linknet_adapted": build_dlsim_linknet,
         "dlsim_attention_unet_adapted": build_dlsim_attention_unet,
     }

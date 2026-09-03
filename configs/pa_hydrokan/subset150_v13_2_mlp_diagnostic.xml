@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset150_v13_2_kan_a.xml" />
+  <run_name type="str">pa_hydrokan_subset150_hydrov13_2_mlp_diagnostic_seed20260831</run_name>
+  <model><edge_gate_type type="str">mlp</edge_gate_type></model>
+  <training><epochs type="int">25</epochs><minimum_epochs type="int">20</minimum_epochs><early_stop_patience type="int">10</early_stop_patience></training>
+</config>

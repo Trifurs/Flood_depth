@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_v13_2_kan_a.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_hydrov13_2_final</run_name>
+  <training><epochs type="int">40</epochs><minimum_epochs type="int">25</minimum_epochs><early_stop_patience type="int">12</early_stop_patience><best_metric type="str">pixel_micro_mae</best_metric></training>
+</config>

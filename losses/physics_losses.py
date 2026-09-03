@@ -126,6 +126,9 @@ def terrain_order_violation_loss(
     maximum_terrain_step_m: float,
     beta: float,
     aggregation_mode: str = "event_macro",
+    local_relief: torch.Tensor | None = None,
+    high_relief_threshold_m: float = 12.0,
+    high_relief_decay_m: float = 8.0,
 ) -> torch.Tensor:
     """Penalize depth changes that follow reliable local terrain changes uphill.
 
@@ -142,6 +145,8 @@ def terrain_order_violation_loss(
         raise ValueError(
             "maximum_terrain_step_m must exceed minimum_terrain_step_m"
         )
+    if high_relief_threshold_m < 0 or high_relief_decay_m <= 0:
+        raise ValueError("invalid high-relief downweighting parameters")
     valid = (
         (positive_mask > 0.5) & (dem_valid > 0.5) & (sensor_valid > 0.5)
     )
@@ -153,6 +158,15 @@ def terrain_order_violation_loss(
         depth_a, depth_b = _pair_slices(depth, axis)
         terrain_a, terrain_b = _pair_slices(z_hyd, axis)
         time_a, time_b = _pair_slices(normalized_day_difference, axis)
+        relief_weight = 1.0
+        if local_relief is not None:
+            relief_a, relief_b = _pair_slices(local_relief, axis)
+            pair_relief = 0.5 * (relief_a + relief_b).detach().clamp_min(0.0)
+            relief_weight = 1.0 / (
+                1.0
+                + F.relu(pair_relief - high_relief_threshold_m)
+                / high_relief_decay_m
+            )
         terrain_step = (terrain_b - terrain_a).detach()
         absolute_step = terrain_step.abs()
         confident_step = (
@@ -161,14 +175,17 @@ def terrain_order_violation_loss(
         )
         pair_valid = valid_a & valid_b & confident_step
         signed_depth_step = terrain_step.sign() * (depth_b - depth_a)
-        violation = F.relu(signed_depth_step)
+        # A small depth tolerance prevents the weak ordering prior from
+        # reacting to sub-pixel label noise or quantisation.  ``beta`` is the
+        # configured tolerance (and also the SmoothL1 transition scale).
+        violation = F.relu(signed_depth_step - beta)
         penalty = F.smooth_l1_loss(
             violation, torch.zeros_like(violation), reduction="none", beta=beta
         )
         pair_time = 0.5 * (time_a + time_b)
         weight = pair_valid.to(depth.dtype) * torch.exp(
             -pair_time.clamp_min(0.0) / sigma_time
-        )
+        ) * relief_weight
         sample_numerators = sample_numerators + (penalty * weight).sum(
             dim=(1, 2, 3)
         )

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit the immutable subset150 raster dataset and emit a runtime contract."""
+"""Audit an immutable flood-depth raster subset and emit a runtime contract."""
 
 from __future__ import annotations
 
@@ -145,7 +145,9 @@ def _merge_band_stats(target: dict[str, Any], observed: dict[str, Any]) -> None:
         )
 
 
-def audit_dataset(root: Path, samples_per_split: int = 3) -> tuple[dict[str, Any], dict[str, Any], str]:
+def audit_dataset(
+    root: Path, samples_per_split: int = 3, dataset_name: str = "subset150"
+) -> tuple[dict[str, Any], dict[str, Any], str]:
     root = root.expanduser().resolve(strict=True)
     errors: list[str] = []
     warnings: list[str] = []
@@ -154,8 +156,10 @@ def audit_dataset(root: Path, samples_per_split: int = 3) -> tuple[dict[str, Any
     readme = root / "README.md"
     metadata_dir = root / "metadata"
     manifest_path = metadata_dir / "training_manifest.csv"
-    if not readme.is_file() or not manifest_path.is_file():
-        raise AuditError("Dataset must contain README.md and metadata/training_manifest.csv")
+    if not manifest_path.is_file():
+        raise AuditError("Dataset must contain metadata/training_manifest.csv")
+    if not readme.is_file():
+        warnings.append("Dataset root has no README.md; metadata files and manifest are used as provenance.")
     locks = sorted(
         path for path in metadata_dir.rglob("*") if path.is_file() and "write_lock" in path.name.lower()
     )
@@ -374,7 +378,9 @@ def audit_dataset(root: Path, samples_per_split: int = 3) -> tuple[dict[str, Any
     if flood_valid_mismatch:
         errors.append(f"flood_mask differs from valid_depth_mask at {flood_valid_mismatch} pixels")
 
-    key_files = [readme, manifest_path]
+    key_files = [manifest_path]
+    if readme.is_file():
+        key_files.insert(0, readme)
     key_files.extend(sorted(metadata_dir.glob("*.json")))
     subset_manifest = metadata_dir / "subset_manifest.csv"
     if subset_manifest.is_file():
@@ -448,7 +454,7 @@ def audit_dataset(root: Path, samples_per_split: int = 3) -> tuple[dict[str, Any
         "created_at": timestamp,
         "status": status,
         "dataset_root": str(root),
-        "source_readme": readme.read_text(encoding="utf-8"),
+        "source_readme": readme.read_text(encoding="utf-8") if readme.is_file() else None,
         "manifest": {
             "relative_path": manifest_path.relative_to(root).as_posix(),
             "sha256": sha256_file(manifest_path),
@@ -489,7 +495,7 @@ def audit_dataset(root: Path, samples_per_split: int = 3) -> tuple[dict[str, Any
         "created_at": timestamp,
         "status": status,
         "dataset_root": str(root),
-        "dataset_name": "subset150",
+        "dataset_name": dataset_name,
         "manifest": audit["manifest"],
         "sample_counts": dict(split_counts),
         "patch": {
@@ -514,7 +520,7 @@ def audit_dataset(root: Path, samples_per_split: int = 3) -> tuple[dict[str, Any
         "normalization": {
             "provided": provided_normalization,
             "selected": None,
-            "required_generated_path": "artifacts/dataset_audit/subset150_train_stats.json",
+            "required_generated_path": f"artifacts/dataset_audit/{dataset_name}_train_stats.json",
         },
         "key_file_sha256": key_hashes,
         "scientific_semantics": {
@@ -529,7 +535,7 @@ def audit_dataset(root: Path, samples_per_split: int = 3) -> tuple[dict[str, Any
     }
 
     report_lines = [
-        "# subset150 dataset audit",
+        f"# {dataset_name} dataset audit",
         "",
         f"- Status: **{status}**",
         f"- Audited at (UTC): `{timestamp}`",
@@ -590,13 +596,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root", type=Path, required=True, help="Immutable dataset root")
     parser.add_argument("--output", type=Path, required=True, help="Project audit output directory")
     parser.add_argument("--samples-per-split", type=int, default=3)
+    parser.add_argument("--dataset-name", default="subset150", help="Stable name used for emitted files")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        audit, contract, report = audit_dataset(args.root, max(2, args.samples_per_split))
+        audit, contract, report = audit_dataset(
+            args.root, max(2, args.samples_per_split), args.dataset_name
+        )
     except (AuditError, ContractError, FileNotFoundError) as exc:
         print(f"DATASET AUDIT FAILED: {exc}", file=sys.stderr)
         return 2
@@ -604,7 +613,7 @@ def main() -> int:
     if not output.is_absolute():
         output = (Path.cwd() / output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    existing_contract_path = output / "subset150_contract.json"
+    existing_contract_path = output / f"{args.dataset_name}_contract.json"
     if existing_contract_path.is_file():
         try:
             existing = json.loads(existing_contract_path.read_text(encoding="utf-8"))
@@ -619,9 +628,9 @@ def main() -> int:
         except (OSError, ValueError, json.JSONDecodeError):
             # A stale/invalid prior project contract is never trusted or required.
             pass
-    atomic_write_json(output / "subset150_audit.json", audit)
-    atomic_write_json(output / "subset150_contract.json", contract)
-    atomic_write_text(output / "subset150_report.md", report)
+    atomic_write_json(output / f"{args.dataset_name}_audit.json", audit)
+    atomic_write_json(output / f"{args.dataset_name}_contract.json", contract)
+    atomic_write_text(output / f"{args.dataset_name}_report.md", report)
     print(
         f"Dataset audit status={audit['status']}; "
         f"rows={audit['manifest']['row_count']}; "

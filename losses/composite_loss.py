@@ -21,6 +21,7 @@ from losses.physics_losses import (
 from losses.pu_loss import nnpu_logistic_loss
 from losses.multiscale_losses import auxiliary_depth_loss, masked_gradient_consistency_loss
 from datasets.preprocessing import RELIABILITY_NAMES
+from losses.task_adaptive_depth_loss import task_adaptive_positive_depth_loss
 
 
 def _event_ids(batch: Mapping[str, Any]) -> Sequence[str] | None:
@@ -104,26 +105,30 @@ class CompositeFloodDepthLoss(nn.Module):
         effective_wse = self.wse_weight(epoch)
         zero = label.sum() * 0.0
         lambda_final = float(self.config["lambda_final"])
-        components = positive_depth_losses(
-            outputs.get("conditional_depth", outputs["positive_depth"]),
-            outputs.get("expected_depth", outputs["depth"])
-            if lambda_final != 0.0
-            else None,
-            label,
-            positive,
-            events,
-            float(self.config["lambda_log"]),
-            lambda_final,
-            self.train_depth_bins,
-            self.primary_depth_bins,
-            float(self.config.get("depth_bias_beta_m", 0.1)),
-            float(self.config.get("depth_underprediction_factor", 1.0)),
-            float(self.config.get("depth_underprediction_min_m", 0.0)),
-            aggregation_mode,
-            str(self.config.get("depth_linear_loss", "smooth_l1")),
-            float(self.config.get("depth_huber_beta_m", 1.0)),
-            float(self.config.get("log_depth_huber_beta", 1.0)),
-        )
+        prediction = outputs.get("conditional_depth", outputs["positive_depth"])
+        if str(self.config.get("objective_mode", "legacy")) == "task_adaptive":
+            components = task_adaptive_positive_depth_loss(
+                prediction, label, positive, self.train_depth_bins,
+                beta_m=float(self.config.get("depth_huber_beta_m", 0.5)),
+                log_weight=float(self.config.get("lambda_log", 0.15)),
+                balance=bool(self.config.get("soft_depth_balance", True)),
+                under_alpha=float(self.config.get("tail_underprediction_alpha", 0.0)),
+                under_min_m=float(self.config.get("depth_underprediction_min_m", 0.48)),
+            )
+        else:
+            components = positive_depth_losses(
+                prediction,
+                outputs.get("expected_depth", outputs["depth"])
+                if lambda_final != 0.0 else None,
+                label, positive, events, float(self.config["lambda_log"]),
+                lambda_final, self.train_depth_bins, self.primary_depth_bins,
+                float(self.config.get("depth_bias_beta_m", 0.1)),
+                float(self.config.get("depth_underprediction_factor", 1.0)),
+                float(self.config.get("depth_underprediction_min_m", 0.0)),
+                aggregation_mode, str(self.config.get("depth_linear_loss", "smooth_l1")),
+                float(self.config.get("depth_huber_beta_m", 1.0)),
+                float(self.config.get("log_depth_huber_beta", 1.0)),
+            )
         exceedance = (
             event_depth_exceedance_loss(
                 outputs["depth"], label, positive, events, self.train_depth_bins,
@@ -144,7 +149,8 @@ class CompositeFloodDepthLoss(nn.Module):
         components.update(pu)
         uncertainty = (
             laplace_nll_loss(
-                outputs["depth"], label, outputs["uncertainty_scale"], positive, events,
+                outputs["depth"] if bool(self.config.get("uncertainty_backprop_to_depth", True)) else outputs["depth"].detach(),
+                label, outputs["uncertainty_scale"], positive, events,
                 self.train_depth_bins, self.primary_depth_bins, aggregation_mode,
             ) if effective_unc != 0.0 else zero
         )
@@ -202,6 +208,9 @@ class CompositeFloodDepthLoss(nn.Module):
                 float(self.config["terrain_order_max_step_m"]),
                 float(self.config["terrain_order_beta_m"]),
                 auxiliary_aggregation,
+                outputs["physical_features"].get("local_relief"),
+                float(self.config.get("terrain_order_high_relief_threshold_m", 12.0)),
+                float(self.config.get("terrain_order_high_relief_decay_m", 8.0)),
             )
         elif wse_mode == "absolute_laplacian":
             wse = weak_wse_laplacian_loss(

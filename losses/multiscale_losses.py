@@ -21,6 +21,9 @@ def auxiliary_depth_loss(auxiliary_depths: Sequence[torch.Tensor], target: torch
     terms: list[torch.Tensor] = []
     for index, prediction in enumerate(auxiliary_depths):
         weight = float(weights[index]) if index < len(weights) else 0.0
+        if weight == 0.0:
+            terms.append(prediction.sum() * 0.0)
+            continue
         pooled, fraction = masked_average_target(target, positive_mask, prediction.shape[-2:])
         selected = fraction > 0
         if selected.any():

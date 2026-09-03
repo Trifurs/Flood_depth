@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <!-- The task-adaptive loss was retained as a controlled ablation but underperformed
+       the legacy objective on validation.  Final training therefore uses the
+       scientifically stronger KAN-A architecture with the established objective. -->
+  <include path="subset150_v13_2_kan_a.xml" />
+  <run_name type="str">pa_hydrokan_subset150_hydrov13_2_final_seed20260831</run_name>
+  <training><epochs type="int">120</epochs><minimum_epochs type="int">40</minimum_epochs><early_stop_patience type="int">25</early_stop_patience><best_metric type="str">pixel_micro_mae</best_metric></training>
+</config>

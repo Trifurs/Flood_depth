@@ -160,7 +160,7 @@ def ensure_within(path: Path, root: Path) -> Path:
 
 @dataclass(frozen=True)
 class DatasetContract:
-    """Validated runtime view of ``subset150_contract.json``."""
+    """Validated runtime view of an audited flood-depth subset contract."""
 
     path: Path
     payload: Mapping[str, Any]
