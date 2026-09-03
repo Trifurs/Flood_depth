@@ -2,9 +2,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
-.artifacts/
 .mypy_cache/
 .matplotlib/
 runs/**
 !runs/.gitkeep
+# Generated audits, evaluation outputs, predictions, plots, and temporary
+# dataset views are local artifacts and are not part of the source repository.
+artifacts/
 *.tmp
