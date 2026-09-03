@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_v15_transfer_control.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_eventscale_control</run_name>
+  <model>
+    <event_depth_scale_enabled type="bool">true</event_depth_scale_enabled>
+    <event_depth_scale_hidden_channels type="int">64</event_depth_scale_hidden_channels>
+    <event_depth_scale_max_log_abs type="float">0.6931471805599453</event_depth_scale_max_log_abs>
+  </model>
+</config>

@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path: sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 from datasets.flooddepth_dataset import prepare_model_inputs
+from datasets.model_input_spec import ModelInputSpec
 from tools.evaluate import embed_source_fingerprints
 from tools.train import create_dataloaders
 from utils.amp import resolve_amp
@@ -70,7 +71,8 @@ def main() -> int:
     wait_start = time.perf_counter()
     batch = move_to_device(next(iter(loader)), device)
     loader_wait = time.perf_counter() - wait_start
-    inputs = prepare_model_inputs(batch); model = build_model(config).to(device)
+    input_spec = ModelInputSpec.from_config(config)
+    inputs = prepare_model_inputs(batch, input_spec); model = build_model(config).to(device)
     if args.checkpoint is not None:
         checkpoint = load_checkpoint(args.checkpoint, model, map_location=device)
         if args.weights == "ema":
@@ -93,11 +95,9 @@ def main() -> int:
     backward_start = time.perf_counter()
     with torch.autocast(device_type=device.type, enabled=active, dtype=dtype):
         backward_outputs = model(inputs)
-        profile_loss = (
-            backward_outputs["depth"].mean()
-            + backward_outputs["support_logits"].square().mean() * 0.01
-            + backward_outputs["uncertainty_scale"].mean() * 0.01
-        )
+        profile_loss = backward_outputs["depth"].mean() + backward_outputs["uncertainty_scale"].mean() * 0.01
+        if "support_logits" in backward_outputs:
+            profile_loss = profile_loss + backward_outputs["support_logits"].square().mean() * 0.01
     profile_loss.backward(); _synchronize(device)
     forward_backward = time.perf_counter() - backward_start
     gradients = [p.grad.detach().float() for p in model.parameters() if p.grad is not None]

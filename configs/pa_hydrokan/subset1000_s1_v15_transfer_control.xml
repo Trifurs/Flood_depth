@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_v15_control.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_transfer_control</run_name>
+  <model>
+    <terrain_mix_init type="float">0.05</terrain_mix_init>
+    <kan_gamma_init_effective type="float">0.02</kan_gamma_init_effective>
+    <kan_gamma_max type="float">0.25</kan_gamma_max>
+  </model>
+</config>

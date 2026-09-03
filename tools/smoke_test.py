@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import torch
 
 from datasets.flooddepth_dataset import prepare_model_inputs
+from datasets.model_input_spec import ModelInputSpec
 from datasets.preprocessing import resolve_depth_stratification_bins
 from losses.composite_loss import CompositeFloodDepthLoss
 from tools.evaluate import dataset_fingerprint, embed_source_fingerprints, evaluate_loader
@@ -51,6 +52,7 @@ def run_smoke(
     train_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(train_dir / "smoke.log")
     train_loader, val_loader, train_dataset, _ = create_dataloaders(config)
+    input_spec = ModelInputSpec.from_config(config)
     depth_bins = resolve_depth_stratification_bins(
         config["loss"], train_dataset.normalizer
     )
@@ -86,7 +88,7 @@ def run_smoke(
         batch = move_to_device(cpu_batch, device)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, enabled=amp_enabled, dtype=amp_dtype):
-            outputs = model(prepare_model_inputs(batch))
+            outputs = model(prepare_model_inputs(batch, input_spec))
             loss, _ = criterion(outputs, batch, epoch=0)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Smoke loss is not finite at batch {batch_index}")
@@ -148,6 +150,7 @@ def run_smoke(
         save_predictions=True,
         amp_enabled=amp_enabled,
         amp_dtype=amp_dtype,
+        input_spec=input_spec,
     )
     if not samples:
         raise RuntimeError("Smoke validation produced no sample metrics")

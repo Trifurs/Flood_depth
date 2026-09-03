@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_v15.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_control</run_name>
+  <model>
+    <support_enabled type="bool">false</support_enabled>
+    <depth_output_semantics type="str">conditional_positive_v2</depth_output_semantics>
+  </model>
+  <training><epochs type="int">5</epochs><minimum_epochs type="int">0</minimum_epochs></training>
+  <loss>
+    <supervised_reduction type="str">pixel_micro</supervised_reduction>
+    <depth_huber_beta_m type="float">1.0</depth_huber_beta_m>
+    <log_depth_huber_beta type="float">1.0</log_depth_huber_beta>
+    <lambda_log type="float">0.15</lambda_log>
+    <lambda_final type="float">0.0</lambda_final>
+    <support_weighted_supervision type="bool">false</support_weighted_supervision>
+    <lambda_depth_bias type="float">0.0</lambda_depth_bias>
+    <depth_underprediction_factor type="float">1.0</depth_underprediction_factor>
+    <lambda_depth_exceedance type="float">0.0</lambda_depth_exceedance>
+    <lambda_pu type="float">0.0</lambda_pu>
+    <lambda_gradient type="float">0.0</lambda_gradient>
+    <lambda_auxiliary type="float">0.05</lambda_auxiliary>
+    <lambda_unc type="float">0.01</lambda_unc>
+    <lambda_wse type="float">0.0</lambda_wse>
+  </loss>
+</config>

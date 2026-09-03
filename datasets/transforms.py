@@ -42,6 +42,7 @@ class SynchronousAugment:
     modality_dropout_probability: float | None = 0.1
     feature_dropout_probability: float | None = None
     sensor_missing_simulation_probability: float | None = None
+    input_mode: str = "s1_s2_terrain"
 
     def __post_init__(self) -> None:
         self._legacy_compat = False
@@ -69,6 +70,12 @@ class SynchronousAugment:
             value = float(getattr(self, name))
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1]")
+        if self.input_mode not in {"s1_s2_terrain", "s1_terrain"}:
+            raise ValueError(f"Unknown input_mode {self.input_mode!r}")
+        if self.input_mode == "s1_terrain":
+            # A single available SAR modality must never be randomly removed.
+            self.feature_dropout_probability = 0.0
+            self.sensor_missing_simulation_probability = 0.0
 
     @staticmethod
     def _modality_keys(modality: str) -> tuple[str, ...]:
@@ -139,7 +146,10 @@ class SynchronousAugment:
         if torch.rand(()) < self.rotate90_probability:
             turns = int(torch.randint(1, 4, ()).item())
             sample = _map_tensors(sample, lambda tensor: torch.rot90(tensor, turns, dims=(-2, -1)))
-        if self._legacy_compat:
+        if self.input_mode == "s1_terrain":
+            sample["metadata"]["modality_dropout"] = "disabled_s1_only"
+            sample["metadata"]["dropout_type"] = "disabled_s1_only"
+        elif self._legacy_compat:
             legacy_missing = torch.rand(()) < float(
                 self.sensor_missing_simulation_probability
             )

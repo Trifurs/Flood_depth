@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_v14.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v14_simple_loss</run_name>
+  <loss><lambda_wse type="float">0.0</lambda_wse><lambda_auxiliary type="float">0.05</lambda_auxiliary><lambda_unc type="float">0.01</lambda_unc><lambda_kan type="float">0.000001</lambda_kan></loss>
+</config>

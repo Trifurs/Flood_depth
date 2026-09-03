@@ -16,6 +16,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from datasets.flooddepth_dataset import FloodDepthDataset
+from datasets.model_input_spec import ModelInputSpec
 from datasets.band_selection import resolve_band_spec
 from datasets.contract import DatasetContract
 from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
@@ -34,10 +35,12 @@ def locate_sample(config: dict, requested: str) -> tuple[FloodDepthDataset, int]
     band_spec = resolve_band_spec(
         config, DatasetContract.load(config["dataset"]["contract"])
     )
+    input_spec = ModelInputSpec.from_config(config)
     for split in ("train", "val", "test"):
         dataset = FloodDepthDataset(
             config["dataset"]["contract"], config["dataset"]["train_stats"], split,
             band_spec=band_spec,
+            input_spec=input_spec,
         )
         for index, row in enumerate(dataset.rows):
             if row["sample_id"] == requested or row["sample_id"] == requested_stem or Path(
@@ -103,6 +106,7 @@ def main() -> int:
         criterion=criterion,
         output_dir=output,
         save_predictions=args.save_geotiff or args.save_visualization,
+        input_spec=ModelInputSpec.from_config(config),
     )
     atomic_write_json(output / "summary.json", summary)
     write_rows(output / "metrics_by_sample.csv", samples)

@@ -11,6 +11,8 @@ from models.pa_hydrokan_v13 import build_pa_hydrokan_v13
 from models.pa_hydrokan_v13_1 import build_pa_hydrokan_v13_1
 from models.pa_hydrokan_v13_2 import build_pa_hydrokan_v13_2
 from models.pa_hydrokan_v14 import build_pa_hydrokan_v14
+from models.pa_hydrokan_s1_v14 import build_pa_hydrokan_s1_v14
+from models.pa_hydrokan_s1_v15 import build_pa_hydrokan_s1_v15
 
 
 def _builders():
@@ -26,6 +28,8 @@ def _builders():
         "pa_hydrokan_v13_1": build_pa_hydrokan_v13_1,
         "pa_hydrokan_v13_2": build_pa_hydrokan_v13_2,
         "pa_hydrokan_v14": build_pa_hydrokan_v14,
+        "pa_hydrokan_s1_v14": build_pa_hydrokan_s1_v14,
+        "pa_hydrokan_s1_v15": build_pa_hydrokan_s1_v15,
         "dlsim_linknet_adapted": build_dlsim_linknet,
         "dlsim_attention_unet_adapted": build_dlsim_attention_unet,
     }

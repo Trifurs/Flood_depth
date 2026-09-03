@@ -18,7 +18,26 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from datasets.flooddepth_dataset import FloodDepthDataset, prepare_model_inputs
-from datasets.preprocessing import RELIABILITY_NAMES, RobustNormalizer, resolve_depth_stratification_bins
+from datasets.preprocessing import RELIABILITY_NAMES, RobustNormalizer, resolve_depth_stratification_bins, reliability_spec_for_mode
+from datasets.model_input_spec import ModelInputSpec
+from datasets.reliability_spec import ReliabilitySpec
+
+
+def _batch_reliability_names(batch: dict[str, Any]) -> tuple[str, ...]:
+    values = batch.get("reliability_names")
+    if isinstance(values, tuple) and values and all(isinstance(item, str) for item in values):
+        return values
+    if isinstance(values, list) and values and all(isinstance(item, str) for item in values):
+        return tuple(values)
+    if isinstance(values, (list, tuple)) and values and all(
+        isinstance(item, (list, tuple)) and item and isinstance(item[0], str)
+        for item in values
+    ):
+        return tuple(str(item[0]) for item in values)
+    metadata = batch.get("metadata")
+    if isinstance(metadata, dict):
+        return _batch_reliability_names({"reliability_names": metadata.get("reliability_names")})
+    return RELIABILITY_NAMES
 from losses.composite_loss import CompositeFloodDepthLoss
 from metrics.aggregator import EvaluationAggregator
 from metrics.physical_metrics import (
@@ -41,11 +60,17 @@ from datasets.band_selection import resolve_band_spec
 
 def dataset_fingerprint(config: dict[str, Any]) -> dict[str, str]:
     contract = DatasetContract.load(config["dataset"]["contract"])
-    return {
+    fingerprint = {
         "contract_sha256": contract.hash,
         "manifest_sha256": sha256_file(contract.manifest_path),
         "normalization_sha256": sha256_file(Path(config["dataset"]["train_stats"])),
     }
+    input_spec = ModelInputSpec.from_config(config)
+    if "input_mode" in config.get("dataset", {}) or str(config["model"]["name"]) == "pa_hydrokan_s1_v14":
+        fingerprint["model_input_spec_sha256"] = input_spec.sha256
+        fingerprint["active_groups_sha256"] = input_spec.active_groups_sha256
+        fingerprint["reliability_spec_sha256"] = ReliabilitySpec.from_mode(input_spec.mode).sha256
+    return fingerprint
 
 
 def embed_source_fingerprints(config: dict[str, Any]) -> dict[str, Any]:
@@ -60,7 +85,11 @@ def embed_source_fingerprints(config: dict[str, Any]) -> dict[str, Any]:
     config["dataset"]["resolved_model_bands"] = resolve_band_spec(
         config, contract
     ).as_dict()
-    config["dataset"]["resolved_reliability_schema"] = list(RELIABILITY_NAMES)
+    input_spec = ModelInputSpec.from_config(config)
+    config["dataset"]["resolved_model_input_spec"] = input_spec.as_dict()
+    config["dataset"]["resolved_reliability_schema"] = list(
+        reliability_spec_for_mode(input_spec.mode).names
+    )
     return config
 
 
@@ -91,23 +120,28 @@ def evaluate_loader(
     progress: bool = True,
     amp_enabled: bool = False,
     amp_dtype: torch.dtype | None = None,
+    input_spec: ModelInputSpec | None = None,
+    validity_mask: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     model.eval()
     aggregator = EvaluationAggregator(train_depth_bins, primary_depth_bins)
     loss_values: list[float] = []
     component_values: dict[str, list[float]] = {}
     event_depth_scales: list[float] = []
+    support_branch_seen = False
     iterator = tqdm(loader, desc="evaluate", leave=False, disable=not progress)
     for batch_index, cpu_batch in enumerate(iterator):
         if max_batches is not None and batch_index >= max_batches:
             break
         batch = move_to_device(cpu_batch, device)
+        reliability_names = _batch_reliability_names(cpu_batch)
+        reliability_index = {name: index for index, name in enumerate(reliability_names)}
         with torch.autocast(
             device_type=device.type,
             enabled=amp_enabled and device.type == "cuda",
             dtype=amp_dtype,
         ):
-            outputs = model(prepare_model_inputs(batch))
+            outputs = model(prepare_model_inputs(batch, input_spec))
             if criterion is not None:
                 loss, components = criterion(outputs, batch, epoch)
                 loss_values.append(float(loss.detach().cpu()))
@@ -131,25 +165,51 @@ def evaluate_loader(
                 .numpy()
             )
             scale = outputs["uncertainty_scale"][sample_index].detach().float().cpu().numpy()
-            support = outputs["support_probability"][sample_index].detach().float().cpu().numpy()
+            support_tensor = outputs.get("support_probability")
+            support_branch_seen = support_branch_seen or support_tensor is not None
+            support = (
+                support_tensor[sample_index].detach().float().cpu().numpy()
+                if support_tensor is not None else None
+            )
             target = batch["label"][sample_index].detach().float().cpu().numpy()
             positive_mask = (
                 batch["masks"]["valid_depth_mask"][sample_index].detach().cpu().numpy() > 0.5
             )
+            metric_valid_mask = positive_mask
+            if validity_mask is not None:
+                if validity_mask == "common_s1":
+                    metric_valid_mask = positive_mask & (
+                        batch["validity"]["s1_event_support"][sample_index].detach().cpu().numpy() > 0.5
+                    ) & (
+                        batch["validity"]["dem_valid"][sample_index].detach().cpu().numpy() > 0.5
+                    )
+                elif validity_mask not in batch["validity"]:
+                    raise KeyError(f"Unknown evaluation validity mask: {validity_mask!r}")
+                else:
+                    metric_valid_mask = positive_mask & (
+                        batch["validity"][validity_mask][sample_index].detach().cpu().numpy() > 0.5
+                    )
             sample_id = str(metadata_item(cpu_batch["metadata"]["sample_id"], sample_index))
             event_id = str(
                 metadata_item(cpu_batch["metadata"]["source_event_id"], sample_index)
             )
+            day_index = reliability_index.get("absolute_normalized_sensor_day_difference")
+            sensor_day = (
+                batch["reliability"][sample_index, day_index:day_index + 1].detach().cpu().numpy()
+                if day_index is not None else np.zeros_like(target)
+            )
+            observation_indices = [reliability_index[name] for name in ("s1_event_observation_count_z", "s2_pre_clear_observation_count_z", "s2_event_clear_observation_count_z") if name in reliability_index]
+            observation = batch["reliability"][sample_index, observation_indices].mean(dim=0, keepdim=True).detach().cpu().numpy() if observation_indices else np.zeros_like(sensor_day)
             row = aggregator.add(
                 sample_id,
                 event_id,
                 prediction,
                 target,
                 scale,
-                positive_mask,
+                metric_valid_mask,
                 support,
-                batch["reliability"][sample_index, RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference"):RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference") + 1].detach().cpu().numpy(),
-                batch["reliability"][sample_index, [RELIABILITY_NAMES.index(name) for name in ("s1_event_observation_count_z", "s2_pre_clear_observation_count_z", "s2_event_clear_observation_count_z")]].mean(dim=0, keepdim=True).detach().cpu().numpy(),
+                sensor_day,
+                observation,
             )
             if "event_depth_scale" in outputs:
                 event_depth_scale = float(
@@ -168,10 +228,9 @@ def evaluate_loader(
             output_valid_np = (
                 batch["validity"]["output_valid"][sample_index].detach().cpu().numpy() > 0.5
             )
-            positive_output_valid = positive_mask & output_valid_np
-            day_difference_np = (
-                batch["reliability"][sample_index, RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference"):RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference") + 1].detach().cpu().numpy()
-            )
+            positive_output_valid = metric_valid_mask & output_valid_np
+            row["evaluation_valid_pixel_fraction"] = float(np.mean(metric_valid_mask))
+            day_difference_np = sensor_day
             row["positive_region_wse_laplacian"] = local_wse_laplacian(
                 prediction, z_hyd, positive_output_valid
             )
@@ -234,22 +293,23 @@ def evaluate_loader(
                     valid_mask=output_valid,
                     descriptions=["conditional_depth_m"],
                 )
-                write_geotiff(
-                    sample_dir / "support_weighted_depth_m.tif",
-                    support_weighted_depth,
-                    crs=crs,
-                    transform=transform,
-                    valid_mask=output_valid,
-                    descriptions=["support_weighted_depth_m"],
-                )
-                write_geotiff(
-                    sample_dir / "support_probability.tif",
-                    support,
-                    crs=crs,
-                    transform=transform,
-                    valid_mask=output_valid,
-                    descriptions=["support_probability"],
-                )
+                if support is not None:
+                    write_geotiff(
+                        sample_dir / "support_weighted_depth_m.tif",
+                        support_weighted_depth,
+                        crs=crs,
+                        transform=transform,
+                        valid_mask=output_valid,
+                        descriptions=["support_weighted_depth_m"],
+                    )
+                    write_geotiff(
+                        sample_dir / "support_probability.tif",
+                        support,
+                        crs=crs,
+                        transform=transform,
+                        valid_mask=output_valid,
+                        descriptions=["support_probability"],
+                    )
                 write_geotiff(
                     sample_dir / "uncertainty_scale_m.tif",
                     scale,
@@ -261,7 +321,7 @@ def evaluate_loader(
                 save_prediction_panel(
                     sample_dir / "prediction_panel.png",
                     s1_change=cpu_batch["s1_change"][sample_index, 0].numpy(),
-                    s2_change=cpu_batch["s2_change"][sample_index, 0].numpy(),
+                    s2_change=(cpu_batch["s2_change"][sample_index, 0].numpy() if "s2_change" in cpu_batch else None),
                     dsm=cpu_batch["terrain_raw"][sample_index, 0].numpy(),
                     target=target[0],
                     prediction=prediction[0],
@@ -278,6 +338,8 @@ def evaluate_loader(
             "unknown",
         )
     )
+    summary["evaluation_validity_mask"] = validity_mask or "label_valid_mask"
+    summary["support_probability_reported"] = support_branch_seen
     if event_depth_scales:
         scale_array = np.asarray(event_depth_scales, dtype=np.float64)
         summary["event_depth_scale_mean"] = float(scale_array.mean())
@@ -300,6 +362,8 @@ def run_evaluation(
     save_predictions: bool,
     max_batches: int | None = None,
     weights: str = "raw",
+    validity_mask: str | None = None,
+    output_semantics_override: str | None = None,
 ) -> dict[str, Any]:
     config = embed_source_fingerprints(load_config(config_path))
     if split not in {"val", "test"}:
@@ -310,9 +374,11 @@ def run_evaluation(
         device = torch.device(device_name)
     contract = DatasetContract.load(config["dataset"]["contract"])
     band_spec = resolve_band_spec(config, contract)
+    input_spec = ModelInputSpec.from_config(config)
     dataset = FloodDepthDataset(
         config["dataset"]["contract"], config["dataset"]["train_stats"], split,
         band_spec=band_spec,
+        input_spec=input_spec,
     )
     loader = DataLoader(
         dataset,
@@ -335,6 +401,11 @@ def run_evaluation(
         model.load_state_dict(ema_state, strict=True)
     elif weights != "raw":
         raise ValueError("weights must be raw or ema")
+    if output_semantics_override is not None:
+        setter = getattr(getattr(model, "heads", None), "set_depth_output_semantics", None)
+        if not callable(setter):
+            raise ValueError("The selected model does not support output semantics override")
+        setter(output_semantics_override)
     checkpoint_epoch = int(checkpoint.get("epoch", 0))
     normalizer = RobustNormalizer(Path(config["dataset"]["train_stats"]), dataset.contract)
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
@@ -363,6 +434,8 @@ def run_evaluation(
             and device.type == "cuda" and torch.cuda.is_bf16_supported()
             else torch.float16
         ),
+        input_spec=input_spec,
+        validity_mask=validity_mask,
     )
     summary["checkpoint_epoch"] = checkpoint_epoch
     summary["weights"] = weights
@@ -384,6 +457,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--max-batches", type=int)
     parser.add_argument("--weights", choices=("raw", "ema"), default="raw")
+    parser.add_argument("--validity-mask", choices=("output_valid", "common_s1", "s1_event_support"))
+    parser.add_argument("--output-semantics", choices=("conditional_positive_v2", "probability_weighted_v1"))
     return parser.parse_args()
 
 
@@ -400,6 +475,8 @@ def main() -> int:
         args.save_predictions,
         args.max_batches,
         args.weights,
+        args.validity_mask,
+        args.output_semantics,
     )
     print(summary)
     return 0

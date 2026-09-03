@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_v15_gpu.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_gpu_precision</run_name>
+  <model>
+    <depth_output_semantics type="str">conditional_positive_v2</depth_output_semantics>
+  </model>
+  <loss>
+    <lambda_final type="float">0.0</lambda_final>
+    <support_weighted_supervision type="bool">false</support_weighted_supervision>
+  </loss>
+</config>

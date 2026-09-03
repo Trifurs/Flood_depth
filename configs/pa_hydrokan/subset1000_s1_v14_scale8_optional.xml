@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_v14.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v14_kan_scale8_optional</run_name>
+  <model><graph_scale type="int">8</graph_scale></model>
+</config>

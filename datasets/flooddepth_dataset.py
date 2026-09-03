@@ -14,7 +14,8 @@ from torch.utils.data import Dataset
 
 from datasets.contract import DatasetContract, MODEL_CONTINUOUS_GROUPS, ensure_within
 from datasets.band_selection import BandSpec
-from datasets.preprocessing import RELIABILITY_NAMES, RobustNormalizer
+from datasets.model_input_spec import ModelInputSpec
+from datasets.preprocessing import RobustNormalizer, reliability_spec_for_mode
 
 
 class DatasetIntegrityError(RuntimeError):
@@ -37,6 +38,7 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         verify_fingerprints: bool = True,
         band_spec: BandSpec | None = None,
+        input_spec: ModelInputSpec | None = None,
     ) -> None:
         if split not in {"train", "val", "test"}:
             raise ValueError(f"Invalid split: {split}")
@@ -46,7 +48,12 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         self.normalizer = RobustNormalizer(Path(stats_path), self.contract)
         self.split = split
         self.transform = transform
-        self.band_spec = band_spec or BandSpec.resolve(self.contract, None)
+        self.input_spec = input_spec or ModelInputSpec.from_mode("s1_s2_terrain")
+        self.contract.validate_input_groups(self.input_spec.active_groups)
+        self.band_spec = band_spec or BandSpec.resolve(
+            self.contract, None, self.input_spec.continuous_groups
+        )
+        self.reliability_spec = reliability_spec_for_mode(self.input_spec.mode)
         with self.contract.manifest_path.open("r", encoding="utf-8-sig", newline="") as handle:
             self.rows = [row for row in csv.DictReader(handle) if row["split"] == split]
         expected = int(self.contract.payload["sample_counts"][split])
@@ -113,16 +120,16 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         arrays: dict[str, np.ndarray] = {}
         validity: dict[str, np.ndarray] = {}
         metadata_by_group: dict[str, dict[str, Any]] = {}
+        read_band_counts: dict[str, int] = {}
         reference_grid: tuple[Any, ...] | None = None
-        for group in self.contract.payload["raster_groups"]:
+        for group in self.input_spec.active_groups:
             selected_indexes = (
                 self.band_spec.read_indexes(self.contract, group)
-                if group in MODEL_CONTINUOUS_GROUPS and not (
-                    group == "terrain"  # raw terrain/physics requires both available bands
-                )
+                if group in self.input_spec.continuous_groups and group != "terrain"
                 else None
             )
             array, valid, metadata = self._read(row, group, selected_indexes)
+            read_band_counts[group] = int(array.shape[0])
             if reference_grid is None:
                 reference_grid = metadata["grid"]
             elif metadata["grid"] != reference_grid:
@@ -148,7 +155,7 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
 
         continuous: dict[str, np.ndarray] = {}
         branch_valid_fractions: dict[str, np.ndarray] = {}
-        for group in MODEL_CONTINUOUS_GROUPS:
+        for group in self.input_spec.continuous_groups:
             descriptions = list(self.band_spec.names(group))
             read_indexes = self.band_spec.read_indexes(self.contract, group)
             positions = [read_indexes.index(index) for index in self.band_spec.indexes(group)]
@@ -177,9 +184,7 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
 
         duration = self._duration(row)
         s1_descriptions = list(self.contract.group("s1_qa")["band_descriptions"])
-        s2_descriptions = list(self.contract.group("s2_qa")["band_descriptions"])
         s1_qa = np.zeros_like(arrays["s1_qa"], dtype=np.float32)
-        s2_qa = np.zeros_like(arrays["s2_qa"], dtype=np.float32)
 
         def qa(group: str, descriptions: list[str], name: str, day: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             position = descriptions.index(name)
@@ -200,16 +205,8 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         s1_day, s1_day_raw, s1_missing = qa(
             "s1_qa", s1_descriptions, "selected_event_day_offset", day=True
         )
-        s2_pre, _, _ = qa("s2_qa", s2_descriptions, "pre_clear_observation_count")
-        s2_event, _, _ = qa("s2_qa", s2_descriptions, "event_clear_observation_count")
-        s2_day, s2_day_raw, s2_missing = qa(
-            "s2_qa", s2_descriptions, "selected_event_day_offset", day=True
-        )
         s1_qa[s1_descriptions.index("event_observation_count")] = s1_obs
         s1_qa[s1_descriptions.index("selected_event_day_offset")] = s1_day
-        s2_qa[s2_descriptions.index("pre_clear_observation_count")] = s2_pre
-        s2_qa[s2_descriptions.index("event_clear_observation_count")] = s2_event
-        s2_qa[s2_descriptions.index("selected_event_day_offset")] = s2_day
 
         # Semantic validity and GeoTIFF/per-band validity must both hold. This avoids
         # treating a tensor-safety zero inserted at raster nodata as a real observation.
@@ -220,38 +217,42 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         s1_valid = (
             masks_np["S1_event_composite_valid_mask"][0]
         ).astype(np.float32)
-        s2_valid = (
-            masks_np["S2_event_composite_valid_mask"][0]
-        ).astype(np.float32)
         dem_valid = (
             masks_np["DEM_valid_mask"][0]
             & masks_np["slope_valid_mask"][0]
             & terrain_raster_valid
         ).astype(np.float32)
-        sensor_days_present = (s1_missing == 0) & (s2_missing == 0)
-        day_difference = np.where(
-            sensor_days_present, np.abs(s1_day_raw - s2_day_raw), 1.0
-        ).astype(np.float32)
         duration_feature = np.full_like(
             s1_valid, np.clip(np.log1p(duration) / np.log(32.0), 0.0, 2.0), dtype=np.float32
         )
-        reliability = np.stack(
-            [
-                s1_obs,
-                s1_day,
-                s2_pre,
-                s2_event,
-                s2_day,
-                s1_valid,
-                s2_valid,
-                dem_valid,
-                duration_feature,
-                day_difference,
-                s1_missing,
-                s2_missing,
-            ],
-            axis=0,
-        ).astype(np.float32)
+        s1_event_support = s1_valid * (branch_valid_fractions["s1_t2"][0] > 0).astype(np.float32)
+        if self.input_spec.is_s1_only:
+            s2_valid = None
+            reliability = np.stack(
+                [s1_obs, s1_day, s1_valid, dem_valid, duration_feature, s1_missing], axis=0
+            ).astype(np.float32)
+            output_valid = dem_valid * s1_event_support
+        else:
+            s2_descriptions = list(self.contract.group("s2_qa")["band_descriptions"])
+            s2_qa = np.zeros_like(arrays["s2_qa"], dtype=np.float32)
+            s2_pre, _, _ = qa("s2_qa", s2_descriptions, "pre_clear_observation_count")
+            s2_event, _, _ = qa("s2_qa", s2_descriptions, "event_clear_observation_count")
+            s2_day, s2_day_raw, s2_missing = qa(
+                "s2_qa", s2_descriptions, "selected_event_day_offset", day=True
+            )
+            s2_qa[s2_descriptions.index("pre_clear_observation_count")] = s2_pre
+            s2_qa[s2_descriptions.index("event_clear_observation_count")] = s2_event
+            s2_qa[s2_descriptions.index("selected_event_day_offset")] = s2_day
+            s2_valid = masks_np["S2_event_composite_valid_mask"][0].astype(np.float32)
+            sensor_days_present = (s1_missing == 0) & (s2_missing == 0)
+            day_difference = np.where(
+                sensor_days_present, np.abs(s1_day_raw - s2_day_raw), 1.0
+            ).astype(np.float32)
+            reliability = np.stack(
+                [s1_obs, s1_day, s2_pre, s2_event, s2_day, s1_valid, s2_valid,
+                 dem_valid, duration_feature, day_difference, s1_missing, s2_missing], axis=0
+            ).astype(np.float32)
+            output_valid = dem_valid * np.maximum(s1_valid, s2_valid)
 
         conditioning_parts: list[np.ndarray] = []
         for source_group, source_index in self.band_spec.conditioning_sources(self.contract):
@@ -267,16 +268,16 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
                 )
             )
 
+        exposed_mask_names = [
+            name for name in mask_names
+            if not self.input_spec.is_s1_only or name != "S2_event_composite_valid_mask"
+        ]
         sample: dict[str, Any] = {
-            "s1_t1": torch.from_numpy(continuous["s1_t1"]),
-            "s1_t2": torch.from_numpy(continuous["s1_t2"]),
-            "s1_change": torch.from_numpy(continuous["s1_change"]),
+            group: torch.from_numpy(continuous[group])
+            for group in self.input_spec.continuous_groups
+        }
+        sample.update({
             "s1_qa": torch.from_numpy(s1_qa),
-            "s2_t1": torch.from_numpy(continuous["s2_t1"]),
-            "s2_t2": torch.from_numpy(continuous["s2_t2"]),
-            "s2_change": torch.from_numpy(continuous["s2_change"]),
-            "s2_qa": torch.from_numpy(s2_qa),
-            "terrain": torch.from_numpy(continuous["terrain"]),
             "terrain_raw": torch.from_numpy(terrain_raw),
             "extent_inputs": {
                 "s1_t1_db": torch.from_numpy(s1_t1_raw),
@@ -285,29 +286,30 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
             },
             "label": torch.from_numpy(label),
             "masks": {
-                name: torch.from_numpy(value.astype(np.float32)) for name, value in masks_np.items()
+                name: torch.from_numpy(masks_np[name].astype(np.float32))
+                for name in exposed_mask_names
             },
             "validity": {
                 "s1_valid": torch.from_numpy(s1_valid[None]),
-                "s2_valid": torch.from_numpy(s2_valid[None]),
                 "dem_valid": torch.from_numpy(dem_valid[None]),
                 # Explicit availability aliases make the semantic/physical
                 # validity contract unambiguous to augmentation and diagnostics.
                 "s1_available": torch.from_numpy(s1_valid[None]),
-                "s2_available": torch.from_numpy(s2_valid[None]),
                 "dem_available": torch.from_numpy(dem_valid[None]),
-                "output_valid": torch.from_numpy((dem_valid * np.maximum(s1_valid, s2_valid))[None]),
+                "s1_event_support": torch.from_numpy(s1_event_support[None]),
+                "output_valid": torch.from_numpy(output_valid[None]),
                 "s1_t1_valid_fraction": torch.from_numpy(branch_valid_fractions["s1_t1"]),
                 "s1_t2_valid_fraction": torch.from_numpy(branch_valid_fractions["s1_t2"]),
                 "s1_change_valid_fraction": torch.from_numpy(branch_valid_fractions["s1_change"]),
-                "s2_t1_valid_fraction": torch.from_numpy(branch_valid_fractions["s2_t1"]),
-                "s2_t2_valid_fraction": torch.from_numpy(branch_valid_fractions["s2_t2"]),
-                "s2_change_valid_fraction": torch.from_numpy(branch_valid_fractions["s2_change"]),
+                "terrain_valid_fraction": torch.from_numpy(
+                    branch_valid_fractions["terrain"]
+                ),
                 "dem_valid_fraction": torch.from_numpy(
                     validity["terrain"].astype(np.float32).mean(axis=0, keepdims=True)
                 ),
             },
             "reliability": torch.from_numpy(reliability),
+            "reliability_names": self.reliability_spec.names,
             "metadata": {
                 "sample_id": row["sample_id"],
                 "source_event_id": row["source_event_id"],
@@ -323,13 +325,28 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
                 "width": metadata_by_group["label"]["width"],
                 "height": metadata_by_group["label"]["height"],
                 "label_path": metadata_by_group["label"]["path"],
-                "reliability_names": RELIABILITY_NAMES,
+                "reliability_names": self.reliability_spec.names,
+                "model_input_spec": self.input_spec.as_dict(),
                 "resolved_model_bands": self.band_spec.as_dict(),
+                "io_profile": {
+                    "opened_files": len(metadata_by_group),
+                    "read_bands": int(sum(read_band_counts.values())),
+                    "read_band_counts": dict(read_band_counts),
+                },
                 "branch_valid_fractions": {
                     key: value.mean().item() for key, value in branch_valid_fractions.items()
                 },
             },
-        }
+        })
+        sample["validity"]["s1_available"] = torch.from_numpy(s1_valid[None])
+        sample["validity"]["dem_available"] = torch.from_numpy(dem_valid[None])
+        sample["validity"]["s1_valid"] = torch.from_numpy(s1_valid[None])
+        if not self.input_spec.is_s1_only:
+            sample["s2_qa"] = torch.from_numpy(s2_qa)
+            sample["validity"]["s2_valid"] = torch.from_numpy(s2_valid[None])
+            sample["validity"]["s2_available"] = torch.from_numpy(s2_valid[None])
+            for group in ("s2_t1", "s2_t2", "s2_change"):
+                sample["validity"][f"{group}_valid_fraction"] = torch.from_numpy(branch_valid_fractions[group])
         if conditioning_parts:
             sample["s1_conditioning"] = torch.from_numpy(
                 np.concatenate(conditioning_parts, axis=0).astype(np.float32)
@@ -349,30 +366,39 @@ MODEL_INPUT_KEYS = (
     "reliability",
 )
 
+S1_MODEL_INPUT_KEYS = (
+    "s1_t1", "s1_t2", "s1_change", "s1_qa", "terrain", "terrain_raw", "reliability",
+)
 
-def prepare_model_inputs(batch: dict[str, Any]) -> dict[str, Any]:
+
+def prepare_model_inputs(
+    batch: dict[str, Any], input_spec: ModelInputSpec | None = None
+) -> dict[str, Any]:
     """Whitelist only label-independent inputs before calling ``model.forward``."""
 
-    missing = [key for key in MODEL_INPUT_KEYS if key not in batch]
+    spec = input_spec or ModelInputSpec.from_mode(
+        "s1_terrain" if "s2_t1" not in batch else "s1_s2_terrain"
+    )
+    required_keys = S1_MODEL_INPUT_KEYS if spec.is_s1_only else MODEL_INPUT_KEYS
+    missing = [key for key in required_keys if key not in batch]
     if missing:
         raise KeyError(f"Batch is missing model inputs: {missing}")
     validity = batch.get("validity")
     if not isinstance(validity, dict):
         raise KeyError("Batch has no validity mapping")
-    result = {
-        **{key: batch[key] for key in MODEL_INPUT_KEYS},
+    result = {key: batch[key] for key in required_keys}
+    result.update({
         "s1_valid": validity["s1_valid"],
-        "s2_valid": validity["s2_valid"],
+        "s1_event_support": validity["s1_event_support"],
         "dem_valid": validity["dem_valid"],
         "branch_validity": {
-            "s1_t1": validity["s1_t1_valid_fraction"],
-            "s1_t2": validity["s1_t2_valid_fraction"],
-            "s1_change": validity["s1_change_valid_fraction"],
-            "s2_t1": validity["s2_t1_valid_fraction"],
-            "s2_t2": validity["s2_t2_valid_fraction"],
-            "s2_change": validity["s2_change_valid_fraction"],
+            group: validity[f"{group}_valid_fraction"]
+            for group in spec.continuous_groups
         },
-    }
+        "reliability_names": reliability_spec_for_mode(spec.mode).names,
+    })
+    if not spec.is_s1_only:
+        result["s2_valid"] = validity["s2_valid"]
     if "s1_conditioning" in batch:
         result["s1_conditioning"] = batch["s1_conditioning"]
     return result

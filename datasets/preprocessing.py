@@ -9,6 +9,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from datasets.contract import DatasetContract, sha256_file
+from datasets.reliability_spec import ReliabilitySpec
 
 
 RELIABILITY_NAMES = (
@@ -25,6 +26,12 @@ RELIABILITY_NAMES = (
     "s1_day_missing",
     "s2_day_missing",
 )
+
+
+def reliability_spec_for_mode(input_mode: str = "s1_s2_terrain") -> ReliabilitySpec:
+    """Resolve the named reliability schema without positional assumptions."""
+
+    return ReliabilitySpec.from_mode(input_mode)
 
 
 class PreprocessingError(RuntimeError):

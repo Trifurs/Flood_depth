@@ -30,6 +30,8 @@ from tqdm import tqdm
 from datasets.contract import DatasetContract, sha256_file
 from datasets.band_selection import resolve_band_spec
 from datasets.flooddepth_dataset import FloodDepthDataset, prepare_model_inputs
+from datasets.model_input_spec import ModelInputSpec
+from datasets.reliability_spec import ReliabilitySpec
 from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
 from datasets.samplers import (
     BalancedRemainderBatchSampler,
@@ -162,6 +164,7 @@ def create_dataloaders(
     config: dict[str, Any], rank: int = 0, world_size: int = 1
 ) -> tuple[DataLoader, DataLoader, FloodDepthDataset, FloodDepthDataset]:
     augmentation = config["dataset"]["augmentation"]
+    input_spec = ModelInputSpec.from_config(config)
     transform = SynchronousAugment(
         float(augmentation["horizontal_flip_probability"]),
         float(augmentation["vertical_flip_probability"]),
@@ -169,6 +172,7 @@ def create_dataloaders(
         augmentation.get("modality_dropout_probability"),
         augmentation.get("feature_dropout_probability"),
         augmentation.get("sensor_missing_simulation_probability"),
+        input_mode=input_spec.mode,
     )
     contract = DatasetContract.load(config["dataset"]["contract"])
     band_spec = resolve_band_spec(config, contract)
@@ -178,10 +182,12 @@ def create_dataloaders(
         "train",
         transform=transform,
         band_spec=band_spec,
+        input_spec=input_spec,
     )
     val_dataset = FloodDepthDataset(
         config["dataset"]["contract"], config["dataset"]["train_stats"], "val",
         band_spec=band_spec,
+        input_spec=input_spec,
     )
     replacement = bool(config["dataset"]["sampling"].get("replacement", False))
     if world_size > 1:
@@ -266,6 +272,7 @@ def train_one_epoch(
     log_every_steps: int = 10,
     csv_enabled: bool = True,
     non_blocking: bool = True,
+    input_spec: ModelInputSpec | None = None,
 ) -> dict[str, float]:
     model.train()
     if hasattr(loader.sampler, "set_epoch"):
@@ -295,7 +302,7 @@ def train_one_epoch(
         with torch.autocast(
             device_type=device.type, enabled=amp_enabled, dtype=amp_dtype
         ):
-            outputs = model(prepare_model_inputs(batch))
+            outputs = model(prepare_model_inputs(batch, input_spec))
             loss, components = criterion(outputs, batch, epoch)
         nonfinite = [name for name, value in components.items()
                      if not torch.isfinite(value.detach()).all()]
@@ -395,42 +402,46 @@ def train_one_epoch(
                 if fusion_entropy else loss.new_tensor(float("nan"))
             )
             if isinstance(batch.get("validity"), Mapping):
-                both_valid = (
-                    torch.minimum(batch["validity"]["s1_valid"], batch["validity"]["s2_valid"]) > 0.5
-                ).float().mean()
+                if "s2_valid" in batch["validity"]:
+                    both_valid = (
+                        torch.minimum(batch["validity"]["s1_valid"], batch["validity"]["s2_valid"]) > 0.5
+                    ).float().mean()
+                else:
+                    both_valid = (batch["validity"]["s1_event_support"] > 0.5).float().mean()
             else:
                 both_valid = loss.new_tensor(float("nan"))
-            append_csv(
-                run_dir / "train_steps.csv",
-                {
-                    "epoch": epoch,
-                    "batch": batch_index,
-                    "loss": float(loss.detach().cpu()),
-                    "learning_rate": optimizer.param_groups[0]["lr"],
-                    "raw_gradient_norm": float(raw_grad_norm.detach().cpu()),
-                    "clipped_gradient_norm": float(clipped_grad_norm.detach().cpu()),
-                    "amp_scale": float(scaler.get_scale()),
-                    "optimizer_steps": optimizer_steps,
-                    "skipped_steps": skipped_steps,
-                    "step_time_seconds": elapsed,
-                    "samples_per_second": interval_samples / elapsed,
-                    "interval_samples": interval_samples,
-                    "data_time_seconds": interval_data_time,
-                    "compute_time_seconds": interval_compute_time,
-                    "graph_gate_mean": float(graph.get("gate_mean", loss.new_tensor(float("nan"))).detach().cpu()),
-                    "graph_gamma_mean": float(graph.get("gamma_mean", loss.new_tensor(float("nan"))).detach().cpu()),
+            step_row = {
+                "epoch": epoch,
+                "batch": batch_index,
+                "loss": float(loss.detach().cpu()),
+                "learning_rate": optimizer.param_groups[0]["lr"],
+                "raw_gradient_norm": float(raw_grad_norm.detach().cpu()),
+                "clipped_gradient_norm": float(clipped_grad_norm.detach().cpu()),
+                "amp_scale": float(scaler.get_scale()),
+                "optimizer_steps": optimizer_steps,
+                "skipped_steps": skipped_steps,
+                "step_time_seconds": elapsed,
+                "samples_per_second": interval_samples / elapsed,
+                "interval_samples": interval_samples,
+                "data_time_seconds": interval_data_time,
+                "compute_time_seconds": interval_compute_time,
+                "graph_gate_mean": float(graph.get("gate_mean", loss.new_tensor(float("nan"))).detach().cpu()),
+                "graph_gamma_mean": float(graph.get("gamma_mean", loss.new_tensor(float("nan"))).detach().cpu()),
+                "terrain_gate_mean": float(terrain_gate_mean.detach().cpu()),
+                "uncertainty_scale_mean": float(uncertainty.mean().cpu()),
+                "uncertainty_scale_p90": float(torch.quantile(uncertainty.flatten(), 0.9).cpu()),
+                "gpu_allocated_bytes": torch.cuda.memory_allocated(device) if device.type == "cuda" else 0,
+                "gpu_reserved_bytes": torch.cuda.memory_reserved(device) if device.type == "cuda" else 0,
+            }
+            if modality_weights:
+                step_row.update({
                     "modality_weight_mean": float(modality_mean.detach().cpu()),
                     "s1_weight_mean": float(s1_weight_mean.detach().cpu()),
                     "s2_weight_mean": float(s2_weight_mean.detach().cpu()),
                     "fusion_entropy_mean": float(fusion_entropy_mean.detach().cpu()),
-                    "terrain_gate_mean": float(terrain_gate_mean.detach().cpu()),
                     "both_sensor_valid_ratio": float(both_valid.detach().cpu()),
-                    "uncertainty_scale_mean": float(uncertainty.mean().cpu()),
-                    "uncertainty_scale_p90": float(torch.quantile(uncertainty.flatten(), 0.9).cpu()),
-                    "gpu_allocated_bytes": torch.cuda.memory_allocated(device) if device.type == "cuda" else 0,
-                    "gpu_reserved_bytes": torch.cuda.memory_reserved(device) if device.type == "cuda" else 0,
-                },
-            )
+                })
+            append_csv(run_dir / "train_steps.csv", step_row)
             interval_start = now
             interval_samples = 0
             interval_data_time = 0.0
@@ -484,6 +495,7 @@ def run_training(args: argparse.Namespace) -> Path:
     setup_logging(run_dir / "train.log" if rank == 0 else None)
     LOGGER.info("Resolved config: %s", jsonable_config(config))
     train_loader, val_loader, train_dataset, _ = create_dataloaders(config, rank, world_size)
+    input_spec = train_dataset.input_spec
     normalizer = train_dataset.normalizer
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
     prior_config = config["dataset"]["positive_prior"]
@@ -698,6 +710,7 @@ def run_training(args: argparse.Namespace) -> Path:
                 int(config["logging"]["log_every_steps"]),
                 bool(config["logging"]["csv"]),
                 bool(config["training"].get("non_blocking", device.type == "cuda")),
+                input_spec,
             )
             global_step += int(train_metrics.get("optimizer_steps", 0.0))
             validation_interval = max(
@@ -756,6 +769,7 @@ def run_training(args: argparse.Namespace) -> Path:
                     progress=True,
                     amp_enabled=amp_enabled,
                     amp_dtype=amp_dtype,
+                    input_spec=input_spec,
                 )
                 if ema is not None:
                     with ema.swap_in(model):
@@ -765,6 +779,7 @@ def run_training(args: argparse.Namespace) -> Path:
                             criterion=criterion, epoch=epoch,
                             max_batches=args.max_val_batches, progress=True,
                             amp_enabled=amp_enabled, amp_dtype=amp_dtype,
+                            input_spec=input_spec,
                         )
             val_summary = broadcast_object(val_summary, source=0)
             ema_summary = broadcast_object(ema_summary, source=0)

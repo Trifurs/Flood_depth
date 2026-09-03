@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_common.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_minimal</run_name>
+  <model><graph_enabled type="bool">false</graph_enabled><auxiliary_count type="int">0</auxiliary_count></model>
+</config>

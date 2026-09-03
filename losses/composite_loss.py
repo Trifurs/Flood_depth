@@ -27,6 +27,26 @@ from datasets.preprocessing import RELIABILITY_NAMES
 from losses.task_adaptive_depth_loss import task_adaptive_positive_depth_loss
 
 
+def _reliability_names(batch: Mapping[str, Any]) -> tuple[str, ...]:
+    values = batch.get("reliability_names")
+    if isinstance(values, (list, tuple)) and values and all(isinstance(value, str) for value in values):
+        return tuple(values)
+    if isinstance(values, (list, tuple)) and values and all(
+        isinstance(value, (list, tuple)) and value and isinstance(value[0], str)
+        for value in values
+    ):
+        return tuple(str(value[0]) for value in values)
+    metadata = batch.get("metadata")
+    if isinstance(metadata, Mapping):
+        nested = metadata.get("reliability_names")
+        if isinstance(nested, (list, tuple)) and nested and all(
+            isinstance(value, (list, tuple)) and value and isinstance(value[0], str)
+            for value in nested
+        ):
+            return tuple(str(value[0]) for value in nested)
+    return RELIABILITY_NAMES
+
+
 def _event_ids(batch: Mapping[str, Any]) -> Sequence[str] | None:
     metadata = batch.get("metadata")
     if not isinstance(metadata, Mapping):
@@ -175,6 +195,10 @@ class CompositeFloodDepthLoss(nn.Module):
             ) if effective_tail != 0.0 else zero
         )
         components["tail"] = tail
+        if effective_pu != 0.0 and "support_logits" not in outputs:
+            raise ValueError(
+                "PU support loss is enabled, but this model exposes no support branch"
+            )
         pu = (
             nnpu_logistic_loss(
                 outputs["support_logits"], positive, unlabeled, self.positive_prior,
@@ -210,9 +234,16 @@ class CompositeFloodDepthLoss(nn.Module):
         components["auxiliary"] = auxiliary
         for index, value in enumerate(auxiliary_terms):
             components[f"auxiliary_{index}"] = value
-        sensor_valid = torch.maximum(validity["s1_valid"], validity["s2_valid"])
-        day_index = RELIABILITY_NAMES.index("absolute_normalized_sensor_day_difference")
-        day_difference = batch["reliability"][:, day_index : day_index + 1]
+        sensor_valid = validity["s1_valid"]
+        if "s2_valid" in validity:
+            sensor_valid = torch.maximum(sensor_valid, validity["s2_valid"])
+        reliability_names = _reliability_names(batch)
+        day_difference = batch["reliability"].new_zeros(
+            batch["reliability"].shape[0], 1, *batch["reliability"].shape[-2:]
+        )
+        if "absolute_normalized_sensor_day_difference" in reliability_names:
+            day_index = reliability_names.index("absolute_normalized_sensor_day_difference")
+            day_difference = batch["reliability"][:, day_index : day_index + 1]
         wse_mode = str(self.config.get("wse_mode", "absolute_laplacian"))
         if effective_wse == 0.0:
             wse = zero

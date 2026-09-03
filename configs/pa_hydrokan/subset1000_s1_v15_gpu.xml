@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_v15.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_gpu</run_name>
+  <device type="str">cuda</device>
+  <training>
+    <batch_size type="int">8</batch_size>
+    <gradient_accumulation_steps type="int">2</gradient_accumulation_steps>
+    <num_workers type="int">4</num_workers>
+    <persistent_workers type="bool">true</persistent_workers>
+    <amp type="bool">true</amp>
+    <amp_dtype type="str">float16</amp_dtype>
+  </training>
+</config>

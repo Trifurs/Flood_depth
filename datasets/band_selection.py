@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from datasets.contract import DatasetContract, MODEL_CONTINUOUS_GROUPS
+from datasets.model_input_spec import ModelInputSpec
 
 
 MODEL_BAND_GROUPS = (*MODEL_CONTINUOUS_GROUPS, "s1_conditioning")
@@ -37,7 +38,9 @@ class BandSpec:
         cls,
         contract: DatasetContract,
         configured: Mapping[str, Sequence[str]] | None,
+        required_groups: Sequence[str] | None = None,
     ) -> "BandSpec":
+        required = tuple(required_groups or MODEL_CONTINUOUS_GROUPS)
         if configured is None:
             return cls(
                 {
@@ -45,7 +48,7 @@ class BandSpec:
                         tuple(str(name) for name in contract.group(group)["band_descriptions"]),
                         tuple(range(len(contract.group(group)["band_descriptions"]))),
                     )
-                    for group in MODEL_CONTINUOUS_GROUPS
+                    for group in required
                 } | {"s1_conditioning": SelectedBands((), ())},
                 legacy_full_bands=True,
             )
@@ -53,7 +56,7 @@ class BandSpec:
         if unknown_groups:
             raise ValueError(f"Unknown model band groups: {sorted(unknown_groups)}")
         resolved: dict[str, SelectedBands] = {}
-        for group in MODEL_CONTINUOUS_GROUPS:
+        for group in required:
             requested = tuple(str(value) for value in configured.get(group, ()))
             if len(requested) != len(set(requested)):
                 raise ValueError(f"Duplicate band names in model_bands.{group}: {requested}")
@@ -66,16 +69,10 @@ class BandSpec:
             resolved[group] = SelectedBands(
                 requested, tuple(available.index(name) for name in requested)
             )
-        cls._validate_temporal_pair(
-            resolved["s1_t1"].names,
-            resolved["s1_t2"].names,
-            "S1",
-        )
-        cls._validate_temporal_pair(
-            resolved["s2_t1"].names,
-            resolved["s2_t2"].names,
-            "S2",
-        )
+        if "s1_t1" in resolved and "s1_t2" in resolved:
+            cls._validate_temporal_pair(resolved["s1_t1"].names, resolved["s1_t2"].names, "S1")
+        if "s2_t1" in resolved and "s2_t2" in resolved:
+            cls._validate_temporal_pair(resolved["s2_t1"].names, resolved["s2_t2"].names, "S2")
         conditioning = tuple(str(value) for value in configured.get("s1_conditioning", ()))
         if len(conditioning) != len(set(conditioning)):
             raise ValueError(f"Duplicate s1_conditioning names: {conditioning}")
@@ -95,9 +92,7 @@ class BandSpec:
         resolved["s1_conditioning"] = SelectedBands(
             conditioning, tuple(temporal_available[name][1] for name in conditioning)
         )
-        empty_required = [
-            group for group in MODEL_CONTINUOUS_GROUPS if not resolved[group].names
-        ]
+        empty_required = [group for group in required if not resolved[group].names]
         if empty_required:
             raise ValueError(f"Model band groups cannot be empty: {empty_required}")
         return cls(resolved, legacy_full_bands=False)
@@ -170,4 +165,6 @@ def resolve_band_spec(config: Mapping[str, Any], contract: DatasetContract) -> B
     configured = dataset.get("model_bands") if isinstance(dataset, Mapping) else None
     if configured is not None and not isinstance(configured, Mapping):
         raise ValueError("dataset.model_bands must be a mapping")
-    return BandSpec.resolve(contract, configured)
+    input_spec = ModelInputSpec.from_config(config)
+    contract.validate_input_groups(input_spec.active_groups)
+    return BandSpec.resolve(contract, configured, input_spec.continuous_groups)

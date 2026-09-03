@@ -19,7 +19,7 @@ def save_prediction_panel(
     path: Path,
     *,
     s1_change: np.ndarray,
-    s2_change: np.ndarray,
+    s2_change: np.ndarray | None = None,
     dsm: np.ndarray,
     target: np.ndarray,
     prediction: np.ndarray,
@@ -29,16 +29,20 @@ def save_prediction_panel(
     path.parent.mkdir(parents=True, exist_ok=True)
     target_view = np.where(valid_label, target, np.nan)
     error_view = np.where(valid_label, np.abs(prediction - target), np.nan)
-    panels = [
-        (s1_change, "S1 representative change", "coolwarm"),
-        (s2_change, "S2 representative change", "coolwarm"),
+    panels = [(s1_change, "S1 representative change", "coolwarm")]
+    if s2_change is not None:
+        panels.append((s2_change, "S2 representative change", "coolwarm"))
+    panels.extend([
         (dsm, "DSM (m)", "terrain"),
         (target_view, "Target depth (m)", "Blues"),
         (prediction, "Predicted depth (m)", "Blues"),
         (uncertainty, "Uncertainty scale (m)", "magma"),
         (error_view, "Absolute error on valid labels", "inferno"),
-    ]
-    figure, axes = plt.subplots(2, 4, figsize=(16, 8), constrained_layout=True)
+    ])
+    columns = 4
+    rows = int(np.ceil(len(panels) / columns))
+    figure, axes = plt.subplots(rows, columns, figsize=(4 * columns, 4 * rows), constrained_layout=True)
+    axes = np.asarray(axes).reshape(-1)
     for axis, (image, title, cmap) in zip(axes.flat, panels):
         shown = axis.imshow(np.asarray(image).squeeze(), cmap=cmap)
         axis.set_title(title)

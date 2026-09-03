@@ -107,6 +107,9 @@ EXPECTED_GROUPS: dict[str, dict[str, Any]] = {
     },
 }
 
+CORE_GROUPS = ("label", "masks", "terrain", "s1_t1", "s1_t2", "s1_change", "s1_qa")
+OPTIONAL_GROUPS = ("s2_t1", "s2_t2", "s2_change", "s2_qa")
+
 MODEL_CONTINUOUS_GROUPS = (
     "s1_t1",
     "s1_t2",
@@ -179,10 +182,17 @@ class DatasetContract:
         groups = payload.get("raster_groups")
         if not isinstance(groups, dict):
             raise ContractError("Contract has no raster_groups mapping")
-        missing = set(EXPECTED_GROUPS).difference(groups)
+        missing = set(CORE_GROUPS).difference(groups)
         if missing:
             raise ContractError(f"Contract is missing groups: {sorted(missing)}")
         return cls(contract_path, payload)
+
+    def validate_input_groups(self, active_groups: tuple[str, ...]) -> None:
+        missing = set(active_groups).difference(self.payload.get("raster_groups", {}))
+        if missing:
+            raise ContractError(
+                f"Contract is missing active input groups: {sorted(missing)}"
+            )
 
     @property
     def dataset_root(self) -> Path:

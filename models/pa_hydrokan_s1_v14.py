@@ -1,0 +1,271 @@
+"""PA-HydroKAN-S1-v14: a truly optical-free Sentinel-1 depth model."""
+
+from __future__ import annotations
+
+from typing import Any, Mapping
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+from datasets.band_selection import BandSpec, resolve_band_spec
+from datasets.contract import DatasetContract
+from datasets.model_input_spec import ModelInputSpec
+from datasets.reliability_spec import ReliabilitySpec
+from models.decoder_v13 import TaskHead
+from models.efficient_blocks import DilatedContext
+from models.hydro_edge_kan_s1 import HydroEdgeKANS1
+from models.sar_hydro_decoder import SARHydroDecoder
+from models.sar_state_change_encoder import SARStateChangeEncoder
+from models.sar_terrain_fusion import SARTerrainResidualFusion
+from models.terrain_features_v14 import TerrainFeaturePyramidV14
+
+
+S1_REQUIRED_INPUTS = {
+    "s1_t1",
+    "s1_t2",
+    "s1_change",
+    "s1_qa",
+    "terrain",
+    "terrain_raw",
+    "reliability",
+    "s1_valid",
+    "s1_event_support",
+    "dem_valid",
+}
+S1_FORBIDDEN_INPUTS = {
+    "label",
+    "masks",
+    "flood_mask",
+    "valid_depth_mask",
+    "split",
+    "sample_origin",
+}
+
+
+class S1DepthHeads(nn.Module):
+    """Conditional positive depth and detached-to-depth uncertainty heads."""
+
+    def __init__(
+        self,
+        channels: int,
+        groups: int,
+        epsilon: float = 0.001,
+        maximum: float = 5.0,
+        support_enabled: bool = False,
+        uncertainty_backbone_gradient: bool = False,
+        depth_initialization_bias: float | None = None,
+    ) -> None:
+        super().__init__()
+        self.depth_head = TaskHead(channels, groups)
+        self.uncertainty_head = TaskHead(channels, groups)
+        self.support_enabled = bool(support_enabled)
+        self.uncertainty_backbone_gradient = bool(uncertainty_backbone_gradient)
+        self.epsilon = float(epsilon)
+        self.maximum = float(maximum)
+        self.depth_output_semantics = "conditional_positive_v2"
+        if self.epsilon <= 0 or self.maximum <= 0:
+            raise ValueError("uncertainty epsilon and maximum must be positive")
+        if depth_initialization_bias is not None:
+            final = self.depth_head.trunk[-1]
+            assert isinstance(final, nn.Conv2d)
+            nn.init.constant_(final.bias, float(depth_initialization_bias))
+        self.support_head = TaskHead(channels, groups) if self.support_enabled else None
+
+    def forward(self, features: torch.Tensor) -> dict[str, torch.Tensor]:
+        conditional = F.softplus(self.depth_head(features))
+        uncertainty_features = (
+            features if self.uncertainty_backbone_gradient else features.detach()
+        )
+        scale = self.epsilon + self.maximum * torch.sigmoid(
+            self.uncertainty_head(uncertainty_features)
+        )
+        outputs = {
+            "depth": conditional,
+            "conditional_depth": conditional,
+            "positive_depth": conditional,
+            "expected_depth": conditional,
+            "uncertainty_scale": scale,
+        }
+        if self.support_head is not None:
+            support_logits = self.support_head(features.detach())
+            support = torch.sigmoid(support_logits)
+            outputs.update({
+                "support_logits": support_logits,
+                "support_probability": support,
+                "expected_depth": support * conditional,
+            })
+        return outputs
+
+
+class PAHydroKANS1V14(nn.Module):
+    """S1-only SAR state/change, terrain residual, graph, and depth decoder."""
+
+    def __init__(
+        self,
+        model_config: Mapping[str, Any],
+        band_spec: BandSpec,
+        raw_terrain_names: tuple[str, ...],
+        input_spec: ModelInputSpec,
+    ) -> None:
+        super().__init__()
+        if not input_spec.is_s1_only:
+            raise ValueError("PA-HydroKAN-S1-v14 requires dataset.input_mode='s1_terrain'")
+        self.input_spec = input_spec
+        self.reliability_spec = ReliabilitySpec.from_mode(input_spec.mode)
+        self.band_spec = band_spec
+        channels = [int(value) for value in model_config.get("channels", [32, 64, 128, 192])]
+        if len(channels) != 4:
+            raise ValueError("PA-HydroKAN-S1-v14 requires four encoder scales")
+        dropout = float(model_config.get("dropout", 0.10))
+        groups = int(model_config.get("group_norm_groups", 8))
+        block_kind = str(model_config.get("residual_block", "efficient"))
+        self.sar_encoder = SARStateChangeEncoder(
+            band_spec.channels("s1_t1"),
+            band_spec.channels("s1_change"),
+            int(model_config.get("s1_qa_channels", 5)),
+            channels,
+            dropout,
+            groups,
+            block_kind,
+            band_spec.channels("s1_conditioning"),
+        )
+        self.terrain = TerrainFeaturePyramidV14(
+            band_spec.channels("terrain"),
+            channels,
+            dropout,
+            groups,
+            float(model_config.get("terrain_pixel_size_m", 20.0)),
+            raw_terrain_names,
+            int(model_config.get("ground_proxy_kernel_size", 9)),
+            str(model_config.get("physics_elevation", "z_ground_proxy")),
+            block_kind,
+        )
+        self.fusion = SARTerrainResidualFusion(
+            channels,
+            dropout,
+            groups,
+            block_kind,
+            float(model_config.get("terrain_residual_init", 0.05)),
+        )
+        self.context = (
+            DilatedContext(channels[-1], groups)
+            if bool(model_config.get("context_enabled", True))
+            else nn.Identity()
+        )
+        self.graph_enabled = bool(model_config.get("graph_enabled", True))
+        self.graph = HydroEdgeKANS1(
+            channels[-1],
+            heads=int(model_config.get("graph_heads", 2)),
+            grid_size=int(model_config.get("kan_grid_size", 4)),
+            spline_order=int(model_config.get("kan_spline_order", 3)),
+            graph_scale=int(model_config.get("graph_scale", 4)),
+            terrain_pixel_size_m=float(model_config.get("terrain_pixel_size_m", 20.0)),
+            feature_centers=model_config.get("graph_feature_centers"),
+            feature_scales=model_config.get("graph_feature_scales"),
+            gamma_init_effective=float(model_config.get("kan_gamma_init_effective", 0.02)),
+            gamma_max=float(model_config.get("kan_gamma_max", 0.25)),
+            latent_compatibility_enabled=bool(model_config.get("latent_compatibility_enabled", True)),
+            diagnostic_mode=bool(model_config.get("diagnostic_mode", False)),
+        )
+        widths = model_config.get("decoder_widths", [96, 64, 48, 32])
+        self.decoder = SARHydroDecoder(
+            channels,
+            dropout,
+            groups,
+            block_kind,
+            widths,
+            int(model_config.get("auxiliary_count", 1)),
+        )
+        self.heads = S1DepthHeads(
+            32,
+            groups,
+            float(model_config.get("uncertainty_epsilon", 0.001)),
+            float(model_config.get("uncertainty_maximum", 5.0)),
+            bool(model_config.get("support_enabled", False)),
+            bool(model_config.get("uncertainty_backbone_gradient", False)),
+            model_config.get("depth_initialization_bias"),
+        )
+
+    def forward(self, inputs: Mapping[str, torch.Tensor]) -> dict[str, Any]:
+        forbidden = set(S1_FORBIDDEN_INPUTS).intersection(inputs)
+        forbidden.update(key for key in inputs if str(key).startswith("s2_"))
+        if forbidden:
+            raise ValueError(f"Forbidden non-S1 inputs: {sorted(forbidden)}")
+        missing = S1_REQUIRED_INPUTS.difference(inputs)
+        if missing:
+            raise KeyError(f"Missing PA-HydroKAN-S1-v14 inputs: {sorted(missing)}")
+        branch_validity = inputs.get("branch_validity", {})
+        conditioning = inputs.get("s1_conditioning")
+        if self.band_spec.channels("s1_conditioning") and conditioning is None:
+            raise KeyError("Missing configured S1 angle conditioning")
+        sar, sar_diagnostics = self.sar_encoder(
+            inputs["s1_t1"],
+            inputs["s1_t2"],
+            inputs["s1_change"],
+            inputs["s1_qa"],
+            inputs["s1_valid"],
+            conditioning,
+            dict(branch_validity),
+        )
+        terrain, physical = self.terrain(
+            inputs["terrain"], inputs["terrain_raw"], inputs["dem_valid"]
+        )
+        sensor_valid = inputs["s1_event_support"]
+        fused, fusion_diagnostics = self.fusion(
+            sar, terrain, physical["dem_valid_fractions"], sensor_valid
+        )
+        bottleneck = self.context(fused[-1])
+        observation_confidence = sar_diagnostics["quality_gates"][-1]
+        if self.graph_enabled:
+            bottleneck, graph_diagnostics = self.graph(
+                bottleneck,
+                physical,
+                sensor_valid,
+                observation_confidence,
+            )
+        else:
+            zero = bottleneck.sum() * 0.0
+            graph_diagnostics = {
+                "gate_mean": zero,
+                "valid_edge_fraction": zero,
+                "static_topographic_affinity_mean": zero,
+                "observation_confidence_mean": zero,
+                "latent_compatibility_mean": zero,
+                "kan_coefficient_magnitude": zero,
+                "kan_coefficient_smoothness": zero,
+                "kan_monotonicity": zero,
+                "kan_curve_smoothness": zero,
+                "gamma_mean": zero,
+                "graph_update_rms_ratio": zero,
+            }
+        decoded, auxiliaries, decoder_gates = self.decoder(
+            bottleneck,
+            fused,
+            terrain,
+            physical["dem_valid_fractions"],
+            sensor_valid,
+            sar_diagnostics["change_evidence"],
+        )
+        outputs = self.heads(decoded)
+        outputs.update({
+            "auxiliary_depths": auxiliaries,
+            "decoder_gates": decoder_gates,
+            "fusion_diagnostics": fusion_diagnostics,
+            "sar_diagnostics": sar_diagnostics,
+            "graph_diagnostics": graph_diagnostics,
+            "physical_features": physical,
+        })
+        return outputs
+
+
+def build_pa_hydrokan_s1_v14(config: Mapping[str, Any]) -> PAHydroKANS1V14:
+    if "model" not in config:
+        raise ValueError("PA-HydroKAN-S1-v14 builder requires the full resolved config")
+    input_spec = ModelInputSpec.from_config(config)
+    if not input_spec.is_s1_only:
+        raise ValueError("PA-HydroKAN-S1-v14 requires dataset.input_mode='s1_terrain'")
+    contract = DatasetContract.load(config["dataset"]["contract"])
+    band_spec = resolve_band_spec(config, contract)
+    raw_names = tuple(str(value) for value in contract.group("terrain")["band_descriptions"])
+    return PAHydroKANS1V14(config["model"], band_spec, raw_names, input_spec)
