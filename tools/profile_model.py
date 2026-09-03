@@ -35,18 +35,20 @@ def _synchronize(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
-def _forward_profile(model, inputs, device, active, dtype, iterations: int):
+def _forward_profile(model, inputs, device, active, dtype, iterations: int, warmup_iterations: int = 5):
     timings = []
     model.eval()
     with torch.no_grad():
-        for index in range(iterations + 5):
+        for index in range(iterations + warmup_iterations):
             _synchronize(device)
             start = time.perf_counter()
             with torch.autocast(device_type=device.type, enabled=active, dtype=dtype):
                 outputs = model(inputs)
             _synchronize(device)
-            if index >= 5:
+            if index >= warmup_iterations:
                 timings.append(time.perf_counter() - start)
+    if not timings:
+        raise ValueError("iterations must be positive")
     mean = sum(timings) / len(timings)
     return outputs, mean
 
@@ -58,6 +60,7 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--weights", choices=("raw", "ema"), default="raw")
+    parser.add_argument("--warmup-iterations", type=int, default=5)
     args = parser.parse_args(); config = embed_source_fingerprints(load_config(args.config))
     if args.batch_size is not None:
         config["training"]["batch_size"] = args.batch_size
@@ -78,10 +81,11 @@ def main() -> int:
     active, dtype, _ = resolve_amp(device, bool(config["training"]["amp"]), str(config["training"].get("amp_dtype", "float16")))
     if device.type == "cuda": torch.cuda.reset_peak_memory_stats(device)
     outputs_one, latency_one = _forward_profile(
-        model, _slice_inputs(inputs, 1), device, active, dtype, args.iterations
+        model, _slice_inputs(inputs, 1), device, active, dtype, args.iterations,
+        args.warmup_iterations,
     )
     outputs, latency = _forward_profile(
-        model, inputs, device, active, dtype, args.iterations
+        model, inputs, device, active, dtype, args.iterations, args.warmup_iterations
     )
     forward_peak = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
     if device.type == "cuda": torch.cuda.reset_peak_memory_stats(device)

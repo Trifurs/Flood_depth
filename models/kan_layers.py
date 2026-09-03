@@ -29,6 +29,7 @@ class KANLinear(nn.Module):
         spline_scale_init: float = 1.0,
         learnable_base_scale: bool = False,
         learnable_spline_scale: bool = False,
+        zero_output_init: bool = False,
     ) -> None:
         super().__init__()
         if in_features < 1 or out_features < 1 or grid_size < 2 or spline_order < 1:
@@ -46,6 +47,7 @@ class KANLinear(nn.Module):
             raise ValueError("base_path must be silu, linear, or none")
         self.input_bounding = input_bounding
         self.base_path = base_path
+        self.zero_output_init = bool(zero_output_init)
         internal = torch.linspace(-1.0, 1.0, grid_size + 1)[1:-1]
         knots = torch.cat(
             (
@@ -82,11 +84,16 @@ class KANLinear(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.kaiming_uniform_(self.base_weight, a=math.sqrt(5))
-        nn.init.normal_(self.spline_coefficients, mean=0.0, std=0.02)
-        fan_in = self.in_features
-        bound = 1.0 / math.sqrt(fan_in)
-        nn.init.uniform_(self.base_bias, -bound, bound)
+        if self.zero_output_init:
+            nn.init.zeros_(self.base_weight)
+            nn.init.zeros_(self.spline_coefficients)
+            nn.init.zeros_(self.base_bias)
+        else:
+            nn.init.kaiming_uniform_(self.base_weight, a=math.sqrt(5))
+            nn.init.normal_(self.spline_coefficients, mean=0.0, std=0.02)
+            fan_in = self.in_features
+            bound = 1.0 / math.sqrt(fan_in)
+            nn.init.uniform_(self.base_bias, -bound, bound)
 
     def b_spline_basis(self, bounded_inputs: torch.Tensor) -> torch.Tensor:
         x = bounded_inputs.clamp(-1.0, 1.0 - torch.finfo(bounded_inputs.dtype).eps)

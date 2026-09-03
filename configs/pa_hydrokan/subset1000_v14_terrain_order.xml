@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config><include path="subset1000_v14_edge_kan_prior_residual.xml" /><run_name type="str">pa_hydrokan_subset1000_hydrov14_terrain_order</run_name><loss><lambda_wse type="float">0.01</lambda_wse><wse_mode type="str">v14_terrain_order</wse_mode></loss></config>

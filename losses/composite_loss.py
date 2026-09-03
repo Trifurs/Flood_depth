@@ -12,10 +12,13 @@ from losses.depth_losses import (
     event_depth_exceedance_loss,
     laplace_nll_loss,
     positive_depth_losses,
+    tail_underprediction_loss,
 )
 from losses.physics_losses import (
+    gated_terrain_order_loss,
     reference_gated_wse_gradient_loss,
     terrain_order_violation_loss,
+    tolerant_wse_slope_loss,
     weak_wse_laplacian_loss,
 )
 from losses.pu_loss import nnpu_logistic_loss
@@ -43,17 +46,24 @@ class CompositeFloodDepthLoss(nn.Module):
         positive_prior: float,
         train_depth_bins: Sequence[float] | None = None,
         primary_depth_bins: Sequence[float] | None = None,
+        train_depth_bin_counts: Sequence[float] | None = None,
     ) -> None:
         super().__init__()
         self.config = dict(loss_config)
+        self.lambda_absolute_laplacian = float(
+            self.config.get("lambda_absolute_laplacian", self.config.get("lambda_wse", 0.0))
+        )
         self.positive_prior = float(positive_prior)
         self.train_depth_bins = tuple(float(value) for value in (train_depth_bins or ()))
         self.primary_depth_bins = tuple(
             float(value) for value in (primary_depth_bins or ())
         )
+        self.train_depth_bin_counts = tuple(float(value) for value in (train_depth_bin_counts or ()))
 
     def wse_weight(self, epoch: int) -> float:
         target = float(self.config["lambda_wse"])
+        if str(self.config.get("wse_mode", "absolute_laplacian")) == "absolute_laplacian" and "lambda_absolute_laplacian" in self.config:
+            target = self.lambda_absolute_laplacian
         start = int(self.config["wse_start_epoch"])
         warmup = max(1, int(self.config["wse_warmup_epochs"]))
         if epoch < start:
@@ -67,8 +77,20 @@ class CompositeFloodDepthLoss(nn.Module):
         if epoch < start:
             return 0.0
         if warmup <= 0:
-            return target
-        return target * min(1.0, (epoch - start + 1) / warmup)
+            weight = target
+        else:
+            weight = target * min(1.0, (epoch - start + 1) / warmup)
+        if name == "auxiliary":
+            decay = str(self.config.get("auxiliary_decay", "constant"))
+            decay_start = float(self.config.get("auxiliary_decay_start_fraction", 0.2))
+            decay_end = float(self.config.get("auxiliary_decay_end_fraction", 0.5))
+            total_epochs = max(1.0, float(self.config.get("schedule_total_epochs", self.config.get("epochs", 1))))
+            fraction = float(epoch) / total_epochs
+            if decay in {"linear", "cosine"} and fraction > decay_start:
+                progress = min(1.0, (fraction - decay_start) / max(decay_end - decay_start, 1e-6))
+                multiplier = 1.0 - progress if decay == "linear" else 0.5 * (1.0 + torch.cos(torch.tensor(progress * torch.pi)).item())
+                weight *= multiplier
+        return weight
 
     def forward(
         self, outputs: Mapping[str, Any], batch: Mapping[str, Any], epoch: int
@@ -102,6 +124,7 @@ class CompositeFloodDepthLoss(nn.Module):
         effective_gradient = self.scheduled_weight("gradient", epoch)
         effective_auxiliary = self.scheduled_weight("auxiliary", epoch)
         effective_kan = self.scheduled_weight("kan", epoch)
+        effective_tail = self.scheduled_weight("tail", epoch)
         effective_wse = self.wse_weight(epoch)
         zero = label.sum() * 0.0
         lambda_final = float(self.config["lambda_final"])
@@ -114,12 +137,15 @@ class CompositeFloodDepthLoss(nn.Module):
                 balance=bool(self.config.get("soft_depth_balance", True)),
                 under_alpha=float(self.config.get("tail_underprediction_alpha", 0.0)),
                 under_min_m=float(self.config.get("depth_underprediction_min_m", 0.48)),
+                balance_alpha=float(self.config.get("soft_depth_balance_alpha", 0.5)),
+                balance_tau=float(self.config.get("soft_depth_balance_tau", 10.0)),
+                train_bin_counts=self.train_depth_bin_counts or None,
             )
         else:
             components = positive_depth_losses(
                 prediction,
                 outputs.get("expected_depth", outputs["depth"])
-                if lambda_final != 0.0 else None,
+                if lambda_final != 0.0 and bool(self.config.get("support_weighted_supervision", True)) else None,
                 label, positive, events, float(self.config["lambda_log"]),
                 lambda_final, self.train_depth_bins, self.primary_depth_bins,
                 float(self.config.get("depth_bias_beta_m", 0.1)),
@@ -137,6 +163,18 @@ class CompositeFloodDepthLoss(nn.Module):
             ) if float(self.config.get("lambda_depth_exceedance", 0.0)) != 0.0 else zero
         )
         components["depth_exceedance"] = exceedance
+        tail_threshold = self.config.get("tail_threshold_m")
+        if tail_threshold is None:
+            tail_threshold = self.train_depth_bins[-2] if len(self.train_depth_bins) >= 3 else 0.0
+        tail = (
+            tail_underprediction_loss(
+                prediction, label, positive, float(tail_threshold),
+                float(self.config.get("tail_margin_m", 0.15)),
+                float(self.config.get("tail_huber_beta_m", 0.25)),
+                "pixel_micro" if aggregation_mode in {"auto", "pixel_micro", "depth_bin_macro"} else "sample_macro",
+            ) if effective_tail != 0.0 else zero
+        )
+        components["tail"] = tail
         pu = (
             nnpu_logistic_loss(
                 outputs["support_logits"], positive, unlabeled, self.positive_prior,
@@ -212,6 +250,34 @@ class CompositeFloodDepthLoss(nn.Module):
                 float(self.config.get("terrain_order_high_relief_threshold_m", 12.0)),
                 float(self.config.get("terrain_order_high_relief_decay_m", 8.0)),
             )
+        elif wse_mode == "v14_terrain_order":
+            wse, order_diag = gated_terrain_order_loss(
+                outputs["conditional_depth"], outputs["physical_features"]["physics_elevation"],
+                positive, validity["dem_valid"], sensor_valid,
+                depth_order_tolerance_m=float(self.config.get("depth_order_tolerance_m", 0.02)),
+                huber_beta_m=float(self.config.get("terrain_order_huber_beta_m", 0.05)),
+                terrain_step_min_m=float(self.config.get("terrain_step_min_m", 0.02)),
+                terrain_step_max_m=float(self.config.get("terrain_step_max_m", 0.75)),
+                terrain_sigma_m=float(self.config.get("terrain_sigma_m", 0.75)),
+                relief=outputs["physical_features"].get("local_relief"),
+                relief_sigma_m=float(self.config.get("terrain_relief_sigma_m", 12.0)),
+                return_diagnostics=True,
+            )
+            components["terrain_order_violation_fraction"] = order_diag["violation_fraction"]
+            components["terrain_order_violation_magnitude"] = order_diag["violation_magnitude"]
+        elif wse_mode == "v14_wse_slope":
+            wse, slope_diag = tolerant_wse_slope_loss(
+                outputs["conditional_depth"], outputs["physical_features"]["physics_elevation"],
+                positive, validity["dem_valid"], sensor_valid,
+                pixel_size_m=float(self.config.get("terrain_pixel_size_m", 20.0)),
+                wse_slope_tolerance=float(self.config.get("wse_slope_tolerance", 0.02)),
+                huber_beta=float(self.config.get("wse_slope_huber_beta", 0.01)),
+                relief=outputs["physical_features"].get("local_relief"),
+                relief_threshold_m=float(self.config.get("wse_relief_threshold_m", 12.0)),
+                return_diagnostics=True,
+            )
+            components["wse_slope_violation_fraction"] = slope_diag["violation_fraction"]
+            components["wse_slope_violation_magnitude"] = slope_diag["violation_magnitude"]
         elif wse_mode == "absolute_laplacian":
             wse = weak_wse_laplacian_loss(
                 outputs["depth"],
@@ -225,7 +291,7 @@ class CompositeFloodDepthLoss(nn.Module):
         else:
             raise ValueError(
                 "loss.wse_mode must be 'absolute_laplacian', "
-                f"'reference_gated_gradient', or 'terrain_order', got {wse_mode!r}"
+                f"'reference_gated_gradient', 'terrain_order', 'v14_terrain_order', or 'v14_wse_slope', got {wse_mode!r}"
             )
         components["wse"] = wse
         if effective_kan != 0.0:
@@ -240,17 +306,22 @@ class CompositeFloodDepthLoss(nn.Module):
             kan_smoothness = zero
         components["kan_magnitude"] = kan_magnitude
         components["kan_smoothness"] = kan_smoothness
+        components["kan_monotonicity"] = outputs.get("graph_diagnostics", {}).get("kan_monotonicity", zero)
+        components["kan_curve_smoothness"] = outputs.get("graph_diagnostics", {}).get("kan_curve_smoothness", zero)
         total = (
             float(self.config["lambda_depth"]) * components["depth"]
             + float(self.config.get("lambda_depth_bias", 0.0))
             * components["depth_bias"]
             + float(self.config.get("lambda_depth_exceedance", 0.0)) * exceedance
+            + effective_tail * tail
             + effective_pu * components["nnpu"]
             + effective_unc * uncertainty
             + effective_gradient * gradient
             + effective_auxiliary * auxiliary
             + effective_wse * wse
             + effective_kan * (kan_magnitude + kan_smoothness)
+            + float(self.config.get("lambda_kan_mono", 0.0)) * components["kan_monotonicity"]
+            + float(self.config.get("lambda_kan_smooth", 0.0)) * components["kan_curve_smoothness"]
         )
         components["total"] = total
         components["wse_effective_weight"] = total.new_tensor(effective_wse)
@@ -259,6 +330,7 @@ class CompositeFloodDepthLoss(nn.Module):
         components["gradient_effective_weight"] = total.new_tensor(effective_gradient)
         components["auxiliary_effective_weight"] = total.new_tensor(effective_auxiliary)
         components["kan_effective_weight"] = total.new_tensor(effective_kan)
+        components["tail_effective_weight"] = total.new_tensor(effective_tail)
         components["positive_pixels"] = total.new_tensor(float(positive.sum().item()))
         components["unlabeled_pixels"] = total.new_tensor(float(unlabeled.sum().item()))
         return total, components

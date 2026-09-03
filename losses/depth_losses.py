@@ -19,6 +19,32 @@ def masked_micro_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return values[selected].mean()
 
 
+def tail_underprediction_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    positive_mask: torch.Tensor,
+    tail_threshold_m: float,
+    tail_margin_m: float = 0.0,
+    beta_m: float = 0.25,
+    aggregation: str = "pixel_micro",
+) -> torch.Tensor:
+    """Penalize only robust underprediction above a train-defined depth threshold."""
+
+    if tail_threshold_m < 0 or tail_margin_m < 0 or beta_m <= 0:
+        raise ValueError("invalid tail loss parameters")
+    target = torch.broadcast_to(target, prediction.shape) if target.shape != prediction.shape else target
+    positive_mask = torch.broadcast_to(positive_mask, prediction.shape) if positive_mask.shape != prediction.shape else positive_mask
+    tail = positive_mask.bool() & (target >= float(tail_threshold_m))
+    error = F.relu(target - prediction - float(tail_margin_m))
+    penalty = F.smooth_l1_loss(error, torch.zeros_like(error), reduction="none", beta=beta_m)
+    if aggregation == "pixel_micro":
+        return masked_micro_mean(penalty, tail)
+    if aggregation == "sample_macro":
+        values = [masked_micro_mean(penalty[index:index + 1], tail[index:index + 1]) for index in range(prediction.shape[0]) if torch.any(tail[index])]
+        return torch.stack(values).mean() if values else prediction.sum() * 0.0
+    raise ValueError("aggregation must be pixel_micro or sample_macro")
+
+
 def event_macro_masked_mean(
     values: torch.Tensor,
     mask: torch.Tensor,

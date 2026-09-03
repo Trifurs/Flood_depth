@@ -103,13 +103,17 @@ def _terrain_order_summary(
     return result
 
 
-def analyze_split(dataset: FloodDepthDataset) -> dict[str, Any]:
+def analyze_split(dataset: FloodDepthDataset, pixel_size_m: float = 20.0) -> dict[str, Any]:
+    if pixel_size_m <= 0:
+        raise ValueError("pixel_size_m must be positive")
     curvature_values: list[np.ndarray] = []
     depth_pair_values: list[np.ndarray] = []
     terrain_pair_values: list[np.ndarray] = []
     signed_depth_steps: list[np.ndarray] = []
     signed_terrain_steps: list[np.ndarray] = []
     wse_pair_values: list[np.ndarray] = []
+    wse_slope_values: list[np.ndarray] = []
+    wse_slope_by_relief: dict[str, list[np.ndarray]] = {"low": [], "medium": [], "high": []}
     time_weight_values: list[np.ndarray] = []
     curvature_macro: list[float] = []
     high_relief_depth_macro: list[float] = []
@@ -163,21 +167,25 @@ def analyze_split(dataset: FloodDepthDataset) -> dict[str, Any]:
                 float(np.concatenate(relief_differences).mean())
             )
 
-        for dim in (-1, -2):
-            if dim == -1:
-                pair = valid[..., :, 1:] & valid[..., :, :-1]
-                depth_step = target[..., :, 1:] - target[..., :, :-1]
-                terrain_step = z_hyd[..., :, 1:] - z_hyd[..., :, :-1]
-                depth_difference = depth_step.abs()
-                terrain_difference = terrain_step.abs()
-                wse_difference = (wse[..., :, 1:] - wse[..., :, :-1]).abs()
+        for dy, dx, distance_m in ((0, 1, pixel_size_m), (1, 0, pixel_size_m), (1, 1, pixel_size_m * np.sqrt(2.0)), (1, -1, pixel_size_m * np.sqrt(2.0))):
+            if dy == 0 and dx == 1:
+                left = (..., slice(None), slice(None, -1))
+                right = (..., slice(None), slice(1, None))
+            elif dy == 1 and dx == 0:
+                left = (..., slice(None, -1), slice(None))
+                right = (..., slice(1, None), slice(None))
+            elif dx == 1:
+                left = (..., slice(None, -1), slice(None, -1))
+                right = (..., slice(1, None), slice(1, None))
             else:
-                pair = valid[..., 1:, :] & valid[..., :-1, :]
-                depth_step = target[..., 1:, :] - target[..., :-1, :]
-                terrain_step = z_hyd[..., 1:, :] - z_hyd[..., :-1, :]
-                depth_difference = depth_step.abs()
-                terrain_difference = terrain_step.abs()
-                wse_difference = (wse[..., 1:, :] - wse[..., :-1, :]).abs()
+                left = (..., slice(None, -1), slice(1, None))
+                right = (..., slice(1, None), slice(None, -1))
+            pair = valid[left] & valid[right]
+            depth_step = target[right] - target[left]
+            terrain_step = z_hyd[right] - z_hyd[left]
+            depth_difference = depth_step.abs()
+            terrain_difference = terrain_step.abs()
+            wse_difference = (wse[right] - wse[left]).abs()
             count = int(pair.sum().item())
             neighbour_pairs += count
             if count:
@@ -186,6 +194,17 @@ def analyze_split(dataset: FloodDepthDataset) -> dict[str, Any]:
                 wse_pair_values.append(wse_difference[pair].numpy())
                 signed_depth_steps.append(depth_step[pair].numpy())
                 signed_terrain_steps.append(terrain_step[pair].numpy())
+                slope = (wse_difference[pair] / float(distance_m)).numpy()
+                wse_slope_values.append(slope)
+                relief_pair = 0.5 * (local_relief[left] + local_relief[right])
+                relief = relief_pair[pair].numpy()
+                for name, selection in (
+                    ("low", relief < 1.0),
+                    ("medium", (relief >= 1.0) & (relief < 12.0)),
+                    ("high", relief >= 12.0),
+                ):
+                    if np.any(selection):
+                        wse_slope_by_relief[name].append(slope[selection])
 
         depth_np = target[valid].numpy()
         terrain_np = z_hyd[valid].numpy()
@@ -210,6 +229,10 @@ def analyze_split(dataset: FloodDepthDataset) -> dict[str, Any]:
         "target_depth_four_neighbour_difference_m": _distribution(depth_pair_values),
         "smoothed_dsm_four_neighbour_difference_m": _distribution(terrain_pair_values),
         "target_wse_four_neighbour_difference_m": _distribution(wse_pair_values),
+        "reference_wse_slope_m_per_m": _distribution(wse_slope_values),
+        "reference_wse_slope_by_relief": {
+            name: _distribution(values) for name, values in wse_slope_by_relief.items()
+        },
         "target_depth_terrain_order": _terrain_order_summary(
             signed_terrain_steps, signed_depth_steps
         ),
@@ -234,6 +257,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("artifacts/diagnostics/physical_target_consistency.json"),
     )
+    parser.add_argument("--pixel-size-m", type=float, default=20.0)
     return parser.parse_args()
 
 
@@ -252,7 +276,7 @@ def main() -> int:
             split,
             transform=None,
         )
-        report["splits"][split] = analyze_split(dataset)
+        report["splits"][split] = analyze_split(dataset, args.pixel_size_m)
     atomic_write_json(args.output, report)
     print(args.output.resolve())
     return 0

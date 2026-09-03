@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config><include path="subset1000_v14_wse_slope.xml" /><run_name type="str">pa_hydrokan_subset1000_hydrov14_final</run_name><loss><lambda_tail type="float">0.10</lambda_tail><tail_start_epoch type="int">12</tail_start_epoch><tail_warmup_epochs type="int">6</tail_warmup_epochs><tail_threshold_m type="float">0.9100000262260437</tail_threshold_m></loss></config>

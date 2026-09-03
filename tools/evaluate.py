@@ -341,7 +341,8 @@ def run_evaluation(
     prior_config = config["dataset"]["positive_prior"]
     prior = normalizer.positive_prior if prior_config["mode"] == "auto" else float(prior_config["value"])
     criterion = CompositeFloodDepthLoss(
-        config["loss"], prior, depth_bins, normalizer.train_depth_bins
+        config["loss"], prior, depth_bins, normalizer.train_depth_bins,
+        normalizer.train_depth_bin_counts,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     summary, samples, events, bins = evaluate_loader(

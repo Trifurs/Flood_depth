@@ -543,7 +543,8 @@ def run_training(args: argparse.Namespace) -> Path:
         int(config["training"].get("ema_warmup_steps", 0)),
     ) if bool(config["training"].get("ema_enabled", False)) else None
     criterion = CompositeFloodDepthLoss(
-        config["loss"], prior, depth_bins, normalizer.train_depth_bins
+        config["loss"], prior, depth_bins, normalizer.train_depth_bins,
+        normalizer.train_depth_bin_counts,
     )
     fingerprint = dataset_fingerprint(config)
     monitor = str(config["training"]["best_metric"])

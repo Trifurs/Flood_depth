@@ -7,6 +7,8 @@ from collections.abc import Sequence
 import torch
 import torch.nn.functional as F
 
+from models.terrain_graph_kan import DIRECTIONS, _roll_with_boundary_mask
+
 
 def _pair_slices(
     tensor: torch.Tensor, axis: str
@@ -257,3 +259,129 @@ def weak_wse_laplacian_loss(
     if denominator.item() == 0:
         return depth.sum() * 0.0
     return (curvature * weight).sum() / denominator
+
+
+def _weighted_robust_mean(values: torch.Tensor, weights: torch.Tensor, beta: float) -> torch.Tensor:
+    if beta <= 0:
+        raise ValueError("robust beta must be positive")
+    numerator = F.smooth_l1_loss(values, torch.zeros_like(values), reduction="none", beta=beta) * weights
+    denominator = weights.sum()
+    return numerator.sum() / denominator.clamp_min(1e-6) if denominator.detach().item() > 0 else values.sum() * 0.0
+
+
+def gated_terrain_order_loss(
+    depth: torch.Tensor,
+    physics_elevation: torch.Tensor,
+    positive_mask: torch.Tensor,
+    dem_valid: torch.Tensor,
+    sensor_valid: torch.Tensor,
+    *,
+    depth_order_tolerance_m: float = 0.02,
+    huber_beta_m: float = 0.05,
+    terrain_step_min_m: float = 0.02,
+    terrain_step_max_m: float = 0.75,
+    terrain_sigma_m: float = 0.75,
+    relief: torch.Tensor | None = None,
+    relief_sigma_m: float = 12.0,
+    return_diagnostics: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Apply a detached fixed topographic gate to tolerant terrain ordering.
+
+    This is a weak structural prior on reliable positive neighbours. It is not a
+    shallow-water equation residual and never uses a learned KAN gate to switch the
+    constraint off.
+    """
+
+    if depth_order_tolerance_m < 0 or terrain_step_min_m < 0 or terrain_step_max_m <= terrain_step_min_m:
+        raise ValueError("invalid terrain-order step/tolerance bounds")
+    if terrain_sigma_m <= 0 or huber_beta_m <= 0 or relief_sigma_m <= 0:
+        raise ValueError("terrain-order scales must be positive")
+    valid = (positive_mask > 0.5) & (dem_valid > 0.5) & (sensor_valid > 0.5)
+    numerators, denominators, violations, violating_weights = [], [], [], []
+    for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        z_b, boundary = _roll_with_boundary_mask(physics_elevation, dy, dx)
+        valid_b, _ = _roll_with_boundary_mask(valid.to(depth.dtype), dy, dx)
+        depth_b, _ = _roll_with_boundary_mask(depth, dy, dx)
+        pair_valid = valid.to(depth.dtype) * valid_b * boundary
+        step = (z_b - physics_elevation).detach()
+        abs_step = step.abs()
+        step_gate = ((abs_step >= terrain_step_min_m) & (abs_step <= terrain_step_max_m)).to(depth.dtype)
+        fixed_prior = torch.exp(-abs_step / terrain_sigma_m)
+        if relief is not None:
+            relief_b, _ = _roll_with_boundary_mask(relief, dy, dx)
+            pair_relief = 0.5 * (relief + relief_b).detach().clamp_min(0.0)
+            fixed_prior = fixed_prior * torch.exp(-pair_relief / relief_sigma_m)
+        weight = (pair_valid * step_gate * fixed_prior).detach()
+        violation = F.relu(step.sign() * (depth_b - depth) - depth_order_tolerance_m)
+        numerators.append(F.smooth_l1_loss(violation, torch.zeros_like(violation), reduction="none", beta=huber_beta_m) * weight)
+        denominators.append(weight)
+        violations.append((violation.detach() * weight, weight))
+        violating_weights.append((violation > 0).to(depth.dtype) * weight)
+    numerator = torch.stack([value.sum() for value in numerators]).sum()
+    denominator = torch.stack([value.sum() for value in denominators]).sum()
+    loss = numerator / denominator.clamp_min(1e-6) if denominator.detach().item() > 0 else depth.sum() * 0.0
+    if not return_diagnostics:
+        return loss
+    weighted_violation = torch.stack([value.sum() for value, _ in violations]).sum()
+    violation_count = torch.stack([value.sum() for value in violating_weights]).sum()
+    active = denominator.clamp_min(1e-6)
+    return loss, {
+        "violation_fraction": violation_count / active,
+        "violation_magnitude": weighted_violation / active,
+        "gate_weight_sum": denominator.detach(),
+    }
+
+
+def tolerant_wse_slope_loss(
+    depth: torch.Tensor,
+    physics_elevation: torch.Tensor,
+    positive_mask: torch.Tensor,
+    dem_valid: torch.Tensor,
+    sensor_valid: torch.Tensor,
+    *,
+    pixel_size_m: float = 20.0,
+    wse_slope_tolerance: float = 0.02,
+    huber_beta: float = 0.01,
+    relief: torch.Tensor | None = None,
+    relief_threshold_m: float = 12.0,
+    affinity_threshold: float = 0.5,
+    return_diagnostics: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Penalize only WSE slopes above a finite tolerance on reliable low-relief pairs."""
+
+    if pixel_size_m <= 0 or wse_slope_tolerance < 0 or huber_beta <= 0:
+        raise ValueError("invalid WSE-slope parameters")
+    valid = (positive_mask > 0.5) & (dem_valid > 0.5) & (sensor_valid > 0.5)
+    eta = physics_elevation + depth
+    losses, weights, excesses, violating_weights = [], [], [], []
+    for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        eta_b, boundary = _roll_with_boundary_mask(eta, dy, dx)
+        z_b, _ = _roll_with_boundary_mask(physics_elevation, dy, dx)
+        valid_b, _ = _roll_with_boundary_mask(valid.to(depth.dtype), dy, dx)
+        pair_valid = valid.to(depth.dtype) * valid_b * boundary
+        distance = pixel_size_m * ((dx * dx + dy * dy) ** 0.5)
+        slope = (eta_b - eta).abs() / distance
+        excess = F.relu(slope - wse_slope_tolerance)
+        fixed_prior = torch.exp(-(z_b - physics_elevation).detach().abs() / max(pixel_size_m * 0.1, 1e-6))
+        if relief is not None:
+            relief_b, _ = _roll_with_boundary_mask(relief, dy, dx)
+            pair_relief = 0.5 * (relief + relief_b).detach().clamp_min(0.0)
+            fixed_prior = fixed_prior * (pair_relief <= relief_threshold_m).to(depth.dtype)
+        weight = (pair_valid * fixed_prior).detach()
+        losses.append(F.smooth_l1_loss(excess, torch.zeros_like(excess), reduction="none", beta=huber_beta) * weight)
+        weights.append(weight)
+        excesses.append(excess.detach() * weight)
+        violating_weights.append((excess > 0).to(depth.dtype) * weight)
+    numerator = torch.stack([value.sum() for value in losses]).sum()
+    denominator = torch.stack([value.sum() for value in weights]).sum()
+    loss = numerator / denominator.clamp_min(1e-6) if denominator.detach().item() > 0 else depth.sum() * 0.0
+    if not return_diagnostics:
+        return loss
+    excess_total = torch.stack([value.sum() for value in excesses]).sum()
+    violating_total = torch.stack([value.sum() for value in violating_weights]).sum()
+    active = denominator.clamp_min(1e-6)
+    return loss, {
+        "violation_fraction": violating_total / active,
+        "violation_magnitude": excess_total / active,
+        "gate_weight_sum": denominator.detach(),
+    }
