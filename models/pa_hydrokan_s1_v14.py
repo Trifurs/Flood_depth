@@ -12,12 +12,12 @@ from datasets.band_selection import BandSpec, resolve_band_spec
 from datasets.contract import DatasetContract
 from datasets.model_input_spec import ModelInputSpec
 from datasets.reliability_spec import ReliabilitySpec
-from models.decoder_v13 import TaskHead
 from models.efficient_blocks import DilatedContext
 from models.hydro_edge_kan_s1 import HydroEdgeKANS1
 from models.sar_hydro_decoder import SARHydroDecoder
 from models.sar_state_change_encoder import SARStateChangeEncoder
 from models.sar_terrain_fusion import SARTerrainResidualFusion
+from models.task_head import TaskHead
 from models.terrain_features_v14 import TerrainFeaturePyramidV14
 
 

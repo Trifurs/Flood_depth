@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <config>
-  <include path="../base.xml" />
-  <include path="../datasets/flooddepth_subset150.xml" />
-  <run_name type="str">subset150_ai4g_mobilenet_iou_extent</run_name>
+  <include path="../pa_hydrokan/subset1000_s1_common.xml" />
+  <run_name type="str">subset1000_s1_ai4g_mobilenet_iou_extent</run_name>
   <extent_model>
     <name type="str">ai4g_mobilenet_v2_unet_iou</name>
     <paper type="str">Misra_et_al_Nature_Communications_2025</paper>

@@ -3,7 +3,7 @@ import torch
 from datasets.samplers import BalancedRemainderBatchSampler
 
 
-def test_remainder_batches_are_balanced_and_cover_every_index() -> None:
+def test_remainder_batches_are_balanced_and_cover_every_index():
     sampler = torch.utils.data.SequentialSampler(range(105))
     batches = list(BalancedRemainderBatchSampler(sampler, batch_size=16))
     sizes = [len(batch) for batch in batches]

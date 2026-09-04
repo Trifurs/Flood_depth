@@ -1,2 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<config><include path="subset1000_v14_final.xml" /><run_name type="str">pa_hydrokan_subset1000_hydrov14_no_s2_final</run_name><model><s2_enabled type="bool">false</s2_enabled></model></config>

@@ -17,7 +17,6 @@ from datasets.band_selection import BandSpec, resolve_band_spec
 from datasets.contract import DatasetContract
 from datasets.model_input_spec import ModelInputSpec
 from datasets.reliability_spec import ReliabilitySpec
-from models.decoder_v13 import TaskHead
 from models.hydro_edge_kan_s1 import HydroEdgeKANS1
 from models.heads import GlobalEventDepthScale
 from models.s1_hydrology_backbone_v15 import (
@@ -26,6 +25,7 @@ from models.s1_hydrology_backbone_v15 import (
     S1HydrologyFusionV15,
 )
 from models.sar_hydro_decoder import SARHydroDecoder
+from models.task_head import TaskHead
 from models.terrain_features_v14 import TerrainFeaturePyramidV14
 
 

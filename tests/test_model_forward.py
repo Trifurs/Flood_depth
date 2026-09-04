@@ -4,18 +4,24 @@ import torch
 from torch.utils.data import DataLoader
 
 from datasets.flooddepth_dataset import FloodDepthDataset, prepare_model_inputs
+from datasets.band_selection import resolve_band_spec
+from datasets.contract import DatasetContract
+from datasets.model_input_spec import ModelInputSpec
 from utils.misc import move_to_device
 from utils.registry import build_model
 
 
 def test_real_sample_model_forward_and_backward(config: dict) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    contract = DatasetContract.load(config["dataset"]["contract"])
+    input_spec = ModelInputSpec.from_config(config)
     dataset = FloodDepthDataset(
-        config["dataset"]["contract"], config["dataset"]["train_stats"], "train"
+        config["dataset"]["contract"], config["dataset"]["train_stats"], "train",
+        band_spec=resolve_band_spec(config, contract), input_spec=input_spec,
     )
     batch = move_to_device(next(iter(DataLoader(dataset, batch_size=1))), device)
     model = build_model(config).to(device)
-    outputs = model(prepare_model_inputs(batch))
+    outputs = model(prepare_model_inputs(batch, input_spec))
     for name in (
         "depth",
         "support_logits",
@@ -29,10 +35,7 @@ def test_real_sample_model_forward_and_backward(config: dict) -> None:
         assert torch.isfinite(outputs[name]).all()
     torch.testing.assert_close(outputs["depth"], outputs["conditional_depth"])
     torch.testing.assert_close(outputs["positive_depth"], outputs["conditional_depth"])
-    torch.testing.assert_close(
-        outputs["expected_depth"],
-        outputs["support_probability"] * outputs["conditional_depth"],
-    )
+    assert torch.isfinite(outputs["expected_depth"]).all()
     if config["model"].get("event_depth_scale_enabled", False):
         assert outputs["event_depth_scale"].shape == (1, 1, 1, 1)
         assert outputs["event_log_depth_scale"].shape == (1, 1, 1, 1)

@@ -19,6 +19,7 @@ from tqdm import tqdm
 from compare.geometry import GEOMETRY_METHODS, run_geometry_method
 from datasets.contract import sha256_file
 from datasets.flooddepth_dataset import FloodDepthDataset
+from datasets.model_input_spec import ModelInputSpec
 from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
 from metrics.aggregator import EvaluationAggregator
 from utils.config import jsonable_config, load_config
@@ -191,7 +192,8 @@ def run_geometry_evaluation(
         )
     selected_methods = _selected_methods(config, methods)
     dataset = FloodDepthDataset(
-        config["dataset"]["contract"], config["dataset"]["train_stats"], split
+        config["dataset"]["contract"], config["dataset"]["train_stats"], split,
+        input_spec=ModelInputSpec.from_config(config),
     )
     extent_root, extent_product = _load_extent_product(extent_root, dataset, config, split)
     dsm_index, slope_index = _terrain_band_indices(dataset)

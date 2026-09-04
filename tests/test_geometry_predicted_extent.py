@@ -10,6 +10,7 @@ import pytest
 from compare.geometry import GEOMETRY_METHODS, run_geometry_method
 from datasets.contract import sha256_file
 from datasets.flooddepth_dataset import FloodDepthDataset
+from datasets.model_input_spec import ModelInputSpec
 from tools.evaluate_geometry import _load_extent_product
 from utils.config import load_config
 
@@ -118,7 +119,7 @@ def test_geometry_rejects_grid_mismatch() -> None:
 
 def test_geometry_config_requires_shared_predicted_extent() -> None:
     config = load_config(
-        PROJECT_ROOT / "configs/compare/subset150_geometry_predicted_extent.xml"
+        PROJECT_ROOT / "configs/compare/subset1000_s1_geometry_predicted_extent.xml"
     )
     assert (
         config["geometry"]["extent_source"]
@@ -130,10 +131,11 @@ def test_geometry_config_requires_shared_predicted_extent() -> None:
 
 def test_geometry_evaluator_rejects_label_derived_extent_manifest(tmp_path: Path) -> None:
     config = load_config(
-        PROJECT_ROOT / "configs/compare/subset150_geometry_predicted_extent.xml"
+        PROJECT_ROOT / "configs/compare/subset1000_s1_geometry_predicted_extent.xml"
     )
     dataset = FloodDepthDataset(
-        config["dataset"]["contract"], config["dataset"]["train_stats"], "val"
+        config["dataset"]["contract"], config["dataset"]["train_stats"], "val",
+        input_spec=ModelInputSpec.from_config(config),
     )
     product = {
         "dataset_fingerprint": {

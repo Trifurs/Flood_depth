@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <config>
-  <include path="pa_hydrokan/subset150_main.xml" />
+  <include path="pa_hydrokan/subset1000_s1_v15_gpu_precision.xml" />
 </config>

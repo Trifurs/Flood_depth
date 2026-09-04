@@ -25,6 +25,7 @@ from tqdm import tqdm
 
 from datasets.contract import DatasetContract, sha256_file
 from datasets.flooddepth_dataset import FloodDepthDataset
+from datasets.model_input_spec import ModelInputSpec
 from datasets.transforms import SynchronousAugment
 from extent.ai4g_mobilenet_unet import AI4GFloodExtentNet
 from extent.losses import masked_soft_iou_loss
@@ -94,9 +95,11 @@ def create_loaders(config: dict[str, Any]) -> tuple[DataLoader, DataLoader, Floo
         config["dataset"]["train_stats"],
         "train",
         transform=transform,
+        input_spec=ModelInputSpec.from_config(config),
     )
     val_dataset = FloodDepthDataset(
-        config["dataset"]["contract"], config["dataset"]["train_stats"], "val"
+        config["dataset"]["contract"], config["dataset"]["train_stats"], "val",
+        input_spec=ModelInputSpec.from_config(config),
     )
     workers = int(config["training"]["num_workers"])
     generator = torch.Generator().manual_seed(int(config["seed"]))

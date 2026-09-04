@@ -1,10 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <config>
-  <!-- Reuse the immutable dataset, train-only depth bins, and pixel metrics. -->
-  <include path="../pa_hydrokan/subset150_hydrov12_frozen.xml" />
-  <run_name type="str">subset150_geometry_shared_predicted_extent</run_name>
+  <include path="../pa_hydrokan/subset1000_s1_common.xml" />
+  <run_name type="str">subset1000_s1_geometry_shared_predicted_extent</run_name>
   <geometry>
-    <!-- All three methods reuse one frozen, label-independent inference product. -->
     <extent_source type="str">ai4g_mobilenet_v2_unet_iou_frozen_prediction</extent_source>
     <terrain_source type="str">elevation_m_DSM_and_slope_deg</terrain_source>
     <parameter_policy type="str">source_defaults_plus_declared_contract_adaptations_frozen_before_test</parameter_policy>
@@ -21,7 +19,6 @@
         <depth_filter_window type="int">3</depth_filter_window>
       </fwdet_v21_dsm_extent>
       <ricorde_local_hand_dsm_extent>
-        <!-- Local replacement for unavailable hydrologic drainage/PWB inputs. -->
         <pseudo_drainage_quantile type="float">0.05</pseudo_drainage_quantile>
         <lower_hand_quantile type="float">0.10</lower_hand_quantile>
         <upper_hand_quantile type="float">0.90</upper_hand_quantile>

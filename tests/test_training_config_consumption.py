@@ -7,7 +7,7 @@ import torch
 
 
 def test_optimizer_and_scheduler_names_are_consumed() -> None:
-    config = load_config(Path("configs/pa_hydrokan/subset150_v13_core.xml"))
+    config = load_config(Path("configs/pa_hydrokan/subset1000_s1_v15.xml"))
     model = torch.nn.Linear(2, 1); optimizer = build_optimizer(model, config)
     scheduler = build_scheduler(optimizer, config, 10, 2)
     assert isinstance(optimizer, torch.optim.AdamW)
@@ -16,8 +16,8 @@ def test_optimizer_and_scheduler_names_are_consumed() -> None:
 
 
 def test_final_runtime_controls_are_resolved() -> None:
-    config = load_config(Path("configs/pa_hydrokan/subset150_v13_final.xml"))
-    assert config["training"]["validation_interval"] == 1
+    config = load_config(Path("configs/pa_hydrokan/subset1000_s1_v15_gpu_precision.xml"))
+    assert config["training"]["minimum_epochs"] == 35
     assert config["training"]["num_workers"] == 4
     assert config["training"]["persistent_workers"] is True
     assert config["checkpoint"]["save_last"] is True

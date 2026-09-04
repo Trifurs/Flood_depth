@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 
 from datasets.flooddepth_dataset import FloodDepthDataset, prepare_model_inputs
+from datasets.model_input_spec import ModelInputSpec
 from extent.ai4g_mobilenet_unet import AI4GFloodExtentNet
 from extent.losses import masked_soft_iou_loss
 from extent.protocol import build_ai4g_change_features, postprocess_extent
@@ -63,9 +64,10 @@ def test_extent_model_forward_contract() -> None:
 
 
 def test_dataset_exposes_raw_s1_only_in_extent_namespace() -> None:
-    config = load_config(PROJECT_ROOT / "configs/extent/subset150_ai4g_mobilenet_iou.xml")
+    config = load_config(PROJECT_ROOT / "configs/extent/subset1000_s1_ai4g_mobilenet_iou.xml")
     dataset = FloodDepthDataset(
-        config["dataset"]["contract"], config["dataset"]["train_stats"], "val"
+        config["dataset"]["contract"], config["dataset"]["train_stats"], "val",
+        input_spec=ModelInputSpec.from_config(config),
     )
     sample = dataset[0]
     assert set(sample["extent_inputs"]) == {"s1_t1_db", "s1_t2_db", "s1_pair_valid"}

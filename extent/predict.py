@@ -17,6 +17,7 @@ import torch
 from tqdm import tqdm
 
 from datasets.flooddepth_dataset import FloodDepthDataset
+from datasets.model_input_spec import ModelInputSpec
 from extent.protocol import build_ai4g_change_features, postprocess_extent
 from extent.train import build_model, dataset_fingerprint, feature_parameters
 from utils.checkpoint import load_checkpoint
@@ -47,7 +48,8 @@ def predict_split(
     device: torch.device,
 ) -> dict[str, Any]:
     dataset = FloodDepthDataset(
-        config["dataset"]["contract"], config["dataset"]["train_stats"], split
+        config["dataset"]["contract"], config["dataset"]["train_stats"], split,
+        input_spec=ModelInputSpec.from_config(config),
     )
     model = build_model(config).to(device)
     checkpoint = load_checkpoint(

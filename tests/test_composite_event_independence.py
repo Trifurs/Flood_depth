@@ -4,15 +4,20 @@ import copy
 
 import torch
 
+from datasets.contract import DatasetContract
+from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
 from losses.composite_loss import CompositeFloodDepthLoss
 
 
 def test_sample_depth_bin_composite_loss_ignores_event_ids(config: dict) -> None:
-    loss_config = config["loss"]
+    loss_config = dict(config["loss"])
+    loss_config["supervised_reduction"] = "sample_depth_bin"
+    contract = DatasetContract.load(config["dataset"]["contract"])
+    normalizer = RobustNormalizer(config["dataset"]["train_stats"], contract)
     objective = CompositeFloodDepthLoss(
         loss_config,
         positive_prior=0.13,
-        train_depth_bins=loss_config["depth_stratification_edges_m"],
+        train_depth_bins=resolve_depth_stratification_bins(loss_config, normalizer),
     )
     target = torch.linspace(0.05, 2.0, 50).reshape(2, 1, 5, 5)
     depth = (target + 0.15).requires_grad_()

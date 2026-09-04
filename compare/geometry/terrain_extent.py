@@ -312,7 +312,8 @@ def flexth_method_a_dsm_extent(
 ) -> GeometryPrediction:
     """Adapt FLEXTH method A to DSM and retain only the supplied predicted support.
 
-    FLEXTH's outward flood expansion is disabled because subset150 has isolated
+    FLEXTH's outward flood expansion is disabled because the audited subset1000
+    contract has isolated
     patches and no complete evaluation target outside the reliable positive labels.
     Morphological closing and small-hole filling remain part of extent preprocessing.
     """

@@ -1,4 +1,4 @@
-"""Independent S1/S2 shared-temporal encoders."""
+"""Small normalization and encoder blocks shared by the S1 model family."""
 
 from __future__ import annotations
 

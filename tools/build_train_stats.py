@@ -267,7 +267,7 @@ def build_stats(config_path: Path, output_override: Path | None = None) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--config", type=Path, default=Path("configs/pa_hydrokan/subset150_main.xml")
+        "--config", type=Path, default=Path("configs/pa_hydrokan/subset1000_s1_v15_gpu_precision.xml")
     )
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
