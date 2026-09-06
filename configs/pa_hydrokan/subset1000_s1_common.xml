@@ -9,6 +9,7 @@
     <train_stats type="path">artifacts/dataset_audit/subset1000_train_stats.json</train_stats>
     <patch_size type="int">256</patch_size>
     <input_mode type="str">s1_terrain</input_mode>
+    <minimum_event_band_fraction type="float">1.0</minimum_event_band_fraction>
     <continuous_groups type="list" item_type="str">
       <item>s1_t1</item><item>s1_t2</item><item>s1_change</item><item>terrain</item>
     </continuous_groups>
@@ -45,6 +46,10 @@
       <terrain type="list"><item>elevation_m_DSM</item><item>slope_deg</item></terrain>
     </model_bands>
   </dataset>
+  <supervision>
+    <positive_mask type="str">valid_depth_mask_and_output_valid</positive_mask>
+    <validation_mask type="str">valid_depth_mask_and_output_valid</validation_mask>
+  </supervision>
   <run_name type="str">pa_hydrokan_subset1000_s1_common</run_name>
   <model>
     <name type="str">pa_hydrokan_s1_v14</name>
@@ -56,7 +61,7 @@
     <s1_qa_channels type="int">5</s1_qa_channels>
     <context_enabled type="bool">true</context_enabled>
     <graph_enabled type="bool">true</graph_enabled>
-    <graph_scale type="int">4</graph_scale>
+    <graph_feature_stride type="int">8</graph_feature_stride>
     <graph_heads type="int">2</graph_heads>
     <kan_grid_size type="int">4</kan_grid_size>
     <kan_spline_order type="int">3</kan_spline_order>
@@ -68,6 +73,7 @@
     <ground_proxy_kernel_size type="int">9</ground_proxy_kernel_size>
     <physics_elevation type="str">z_ground_proxy</physics_elevation>
     <decoder_widths type="list" item_type="int"><item>96</item><item>64</item><item>48</item><item>32</item></decoder_widths>
+    <terrain_alpha_max type="float">1.0</terrain_alpha_max>
     <auxiliary_count type="int">1</auxiliary_count>
     <support_enabled type="bool">false</support_enabled>
     <uncertainty_epsilon type="float">0.001</uncertainty_epsilon>

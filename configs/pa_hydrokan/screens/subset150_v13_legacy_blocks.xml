@@ -1,0 +1,1 @@
+<?xml version="1.0"?><config><include path="../subset150_v13_compact.xml"/><run_name type="str">v13_screen_legacy_blocks</run_name><model><residual_block type="str">legacy</residual_block></model></config>

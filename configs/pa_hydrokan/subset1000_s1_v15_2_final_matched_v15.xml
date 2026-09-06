@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <!-- Strict final reference: the matched V15 architecture under exactly the
+       same seed-specific, BF16, batch, optimizer, scheduler, augmentation,
+       checkpoint-selection, and early-stopping protocol as the candidate. -->
+  <include path="subset1000_s1_v15_2_matched_v15.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_2_final_matched_v15</run_name>
+  <training>
+    <epochs type="int">100</epochs>
+    <minimum_epochs type="int">35</minimum_epochs>
+    <early_stop_patience type="int">20</early_stop_patience>
+    <best_weights type="str">raw</best_weights>
+  </training>
+  <loss>
+    <schedule_total_epochs type="int">100</schedule_total_epochs>
+  </loss>
+</config>

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import logging
 import math
@@ -23,8 +24,7 @@ import numpy as np
 import rasterio
 import torch
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import DataLoader, default_collate
 from tqdm import tqdm
 
 from datasets.contract import DatasetContract, sha256_file
@@ -33,6 +33,10 @@ from datasets.flooddepth_dataset import FloodDepthDataset, prepare_model_inputs
 from datasets.model_input_spec import ModelInputSpec
 from datasets.reliability_spec import ReliabilitySpec
 from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
+from datasets.supervision_masks import (
+    canonical_positive_mask_from_batch,
+    validate_supervision_config,
+)
 from datasets.samplers import (
     BalancedRemainderBatchSampler,
     DistributedEventBalancedSampler,
@@ -41,7 +45,9 @@ from datasets.samplers import (
     make_event_balanced_sampler,
 )
 from datasets.transforms import SynchronousAugment
+from datasets.train_depth_calibration import collect_canonical_train_depths
 from losses.composite_loss import CompositeFloodDepthLoss
+from losses.frozen_soft_depth_balance import FrozenSoftDepthBalance
 from tools.evaluate import dataset_fingerprint, embed_source_fingerprints, evaluate_loader
 from utils.checkpoint import (
     checkpoint_depth_output_semantics,
@@ -62,7 +68,8 @@ from utils.misc import atomic_write_json, move_to_device
 from utils.registry import build_model
 from utils.seed import seed_everything, seed_worker
 from utils.amp import resolve_amp
-from utils.ema import ModelEMA
+from utils.ema import ModelEMA, restore_ema_after_checkpoint_load
+from utils.graph_metadata import resolved_graph_identity, runtime_graph_identity
 from utils.optim import build_optimizer, build_scheduler
 
 
@@ -114,6 +121,155 @@ def normalize_accumulated_gradients(model: torch.nn.Module, sample_count: int) -
             parameter.grad.div_(sample_count)
 
 
+def _diagnostic_mean(value: Any, default: float = 0.0) -> float:
+    """Safely reduce a scalar/map diagnostic without retaining a computation graph."""
+
+    if not isinstance(value, torch.Tensor) or value.numel() == 0:
+        return default
+    reduced = value.detach().float().mean()
+    return float(reduced.cpu()) if torch.isfinite(reduced) else default
+
+
+def _training_diagnostic_values(
+    outputs: Mapping[str, Any], batch: Mapping[str, Any]
+) -> dict[str, float]:
+    """Compact V15.1 observability values for CSV and epoch/TensorBoard logs."""
+
+    graph = outputs.get("graph_diagnostics", {})
+    sar = outputs.get("sar_diagnostics", {})
+    fusion = outputs.get("fusion_diagnostics", {})
+    positive = canonical_positive_mask_from_batch(batch)
+    scale = outputs.get("uncertainty_scale")
+    if isinstance(scale, torch.Tensor) and bool(torch.any(positive)):
+        selected_scale = scale.detach().float()[positive]
+        uncertainty_p50 = float(torch.quantile(selected_scale, 0.50).cpu())
+        uncertainty_p90 = float(torch.quantile(selected_scale, 0.90).cpu())
+        uncertainty_p99 = float(torch.quantile(selected_scale, 0.99).cpu())
+    else:
+        uncertainty_p50 = uncertainty_p90 = uncertainty_p99 = 0.0
+    terrain_alpha = fusion.get("terrain_alpha", fusion.get("terrain_mix"))
+    return {
+        "internal_change_weight_mean": _diagnostic_mean(sar.get("internal_weight_mean")),
+        "external_change_weight_mean": _diagnostic_mean(sar.get("external_weight_mean")),
+        "pair_valid_fraction_mean": _diagnostic_mean(sar.get("pair_valid_fraction_mean")),
+        "pre_context_gate_mean": _diagnostic_mean(sar.get("pre_context_gate_mean")),
+        "change_gate_mean": _diagnostic_mean(sar.get("change_gate_mean")),
+        "angle_gamma_rms": _diagnostic_mean(sar.get("angle_gamma_rms")),
+        "angle_beta_rms": _diagnostic_mean(sar.get("angle_beta_rms")),
+        "angle_conditioner_output_input_rms_ratio": _diagnostic_mean(
+            sar.get("angle_conditioner_output_input_rms_ratio")
+        ),
+        "absolute_sar_shortcut_scale_mean": _diagnostic_mean(
+            sar.get("absolute_sar_shortcut_scale")
+        ),
+        "absolute_sar_shortcut_residual_input_rms_ratio": _diagnostic_mean(
+            sar.get("absolute_sar_shortcut_residual_input_rms_ratio")
+        ),
+        "terrain_alpha_mean": _diagnostic_mean(terrain_alpha),
+        "terrain_gate_mean": _diagnostic_mean(fusion.get("terrain_gate_mean")),
+        "terrain_residual_input_rms_ratio": _diagnostic_mean(
+            fusion.get("terrain_residual_input_rms_ratio")
+        ),
+        "topographic_kan_logit_mean": _diagnostic_mean(
+            graph.get("topographic_kan_logit_mean")
+        ),
+        "observation_amplitude_mean": _diagnostic_mean(
+            graph.get("observation_amplitude_mean")
+        ),
+        "latent_compatibility_mean": _diagnostic_mean(
+            graph.get("latent_compatibility_mean")
+        ),
+        "final_graph_gate_mean": _diagnostic_mean(
+            graph.get("final_graph_gate_mean", graph.get("gate_mean"))
+        ),
+        "graph_gamma_mean": _diagnostic_mean(
+            graph.get("graph_gamma_mean", graph.get("gamma_mean"))
+        ),
+        "graph_update_input_rms_ratio": _diagnostic_mean(
+            graph.get("graph_update_rms_ratio")
+        ),
+        "graph_bottleneck_scale": _diagnostic_mean(
+            graph.get("graph_bottleneck_scale")
+        ),
+        "graph_bottleneck_residual_input_rms_ratio": _diagnostic_mean(
+            graph.get("graph_bottleneck_residual_input_rms_ratio")
+        ),
+        "spline_base_rms_ratio": _diagnostic_mean(
+            graph.get("spline_base_rms_ratio")
+        ),
+        "knot_boundary_saturation_fraction": _diagnostic_mean(
+            graph.get("knot_boundary_saturation_fraction")
+        ),
+        "uncertainty_scale_p50": uncertainty_p50,
+        "uncertainty_scale_p90": uncertainty_p90,
+        "uncertainty_scale_p99": uncertainty_p99,
+        "canonical_positive_pixel_count": float(positive.sum().item()),
+    }
+
+
+def _physics_output_gradient_diagnostics(
+    outputs: Mapping[str, Any], components: Mapping[str, torch.Tensor]
+) -> dict[str, float]:
+    """Measure weak-physics and supervised gradients with respect to depth.
+
+    This intentionally measures at the conditional-depth output rather than every
+    parameter: it is architecture-independent, does not invoke a second optimizer
+    pass, and directly answers whether the local prior contributes a finite signal
+    to the estimated depth.  Call it at most once per epoch before ``backward``.
+    """
+
+    zeros = {
+        "physics_gradient_norm": 0.0,
+        "depth_gradient_norm": 0.0,
+        "physics_depth_gradient_cosine_similarity": 0.0,
+        "physics_gradient_measured": 0.0,
+    }
+    prediction = outputs.get("conditional_depth", outputs.get("depth"))
+    physics = components.get("physics")
+    effective_weight = components.get("physics_effective_weight")
+    supervised = components.get("depth")
+    if (
+        not isinstance(prediction, torch.Tensor)
+        or not prediction.requires_grad
+        or not isinstance(physics, torch.Tensor)
+        or not isinstance(effective_weight, torch.Tensor)
+        or not isinstance(supervised, torch.Tensor)
+        or float(effective_weight.detach().cpu()) == 0.0
+    ):
+        return zeros
+    physics_gradient = torch.autograd.grad(
+        effective_weight * physics,
+        prediction,
+        retain_graph=True,
+        allow_unused=True,
+    )[0]
+    depth_gradient = torch.autograd.grad(
+        supervised,
+        prediction,
+        retain_graph=True,
+        allow_unused=True,
+    )[0]
+    if physics_gradient is None or depth_gradient is None:
+        return zeros
+    physics_vector = physics_gradient.detach().float().reshape(-1)
+    depth_vector = depth_gradient.detach().float().reshape(-1)
+    physics_norm = torch.linalg.vector_norm(physics_vector)
+    depth_norm = torch.linalg.vector_norm(depth_vector)
+    cosine = torch.dot(physics_vector, depth_vector) / (
+        physics_norm * depth_norm
+    ).clamp_min(1.0e-12)
+    if not all(
+        bool(torch.isfinite(value)) for value in (physics_norm, depth_norm, cosine)
+    ):
+        return zeros
+    return {
+        "physics_gradient_norm": float(physics_norm.cpu()),
+        "depth_gradient_norm": float(depth_norm.cpu()),
+        "physics_depth_gradient_cosine_similarity": float(cosine.cpu()),
+        "physics_gradient_measured": 1.0,
+    }
+
+
 def resolve_cli(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     resume = getattr(args, "resume", None)
     init_checkpoint = getattr(args, "init_checkpoint", None)
@@ -157,12 +313,19 @@ def make_training_context(
         "steps_per_epoch": int(steps_per_epoch),
         "planned_total_optimizer_steps": int(epochs * steps_per_epoch),
         "warmup_steps": int(config["scheduler"]["warmup_epochs"]) * steps_per_epoch,
+        "frozen_depth_balance_sha256": config.get("loss", {}).get(
+            "frozen_depth_balance_sha256"
+        ),
+        "depth_initialization_bias": config.get("model", {}).get(
+            "depth_initialization_bias"
+        ),
     }
 
 
 def create_dataloaders(
     config: dict[str, Any], rank: int = 0, world_size: int = 1
 ) -> tuple[DataLoader, DataLoader, FloodDepthDataset, FloodDepthDataset]:
+    validate_supervision_config(config)
     augmentation = config["dataset"]["augmentation"]
     input_spec = ModelInputSpec.from_config(config)
     transform = SynchronousAugment(
@@ -183,11 +346,19 @@ def create_dataloaders(
         transform=transform,
         band_spec=band_spec,
         input_spec=input_spec,
+        minimum_event_band_fraction=float(
+            config["dataset"].get("minimum_event_band_fraction", 1.0)
+        ),
+        s1_qa_names=config["dataset"].get("model_s1_qa_names"),
     )
     val_dataset = FloodDepthDataset(
         config["dataset"]["contract"], config["dataset"]["train_stats"], "val",
         band_spec=band_spec,
         input_spec=input_spec,
+        minimum_event_band_fraction=float(
+            config["dataset"].get("minimum_event_band_fraction", 1.0)
+        ),
+        s1_qa_names=config["dataset"].get("model_s1_qa_names"),
     )
     replacement = bool(config["dataset"]["sampling"].get("replacement", False))
     if world_size > 1:
@@ -207,13 +378,11 @@ def create_dataloaders(
             else EventEpochSampler(train_dataset.event_ids, int(config["seed"]))
         )
     workers = int(config["training"]["num_workers"])
-    generator = torch.Generator().manual_seed(int(config["seed"]) + rank)
     common = {
         "num_workers": workers,
         "persistent_workers": bool(config["training"]["persistent_workers"]) if workers > 0 else False,
         "pin_memory": torch.cuda.is_available(),
         "worker_init_fn": seed_worker,
-        "generator": generator,
     }
     if workers > 0:
         common["prefetch_factor"] = int(config["training"].get("prefetch_factor", 2))
@@ -225,6 +394,7 @@ def create_dataloaders(
             bool(config["training"].get("drop_last", False)),
         ),
         **common,
+        generator=torch.Generator().manual_seed(int(config["seed"]) + rank),
     )
     val_loader = DataLoader(
         val_dataset,
@@ -232,8 +402,223 @@ def create_dataloaders(
         shuffle=False,
         drop_last=False,
         **common,
+        generator=torch.Generator().manual_seed(int(config["seed"]) + 100_000 + rank),
     )
     return train_loader, val_loader, train_dataset, val_dataset
+
+
+def _inverse_softplus(value: float) -> float:
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError("train positive-depth median must be finite and positive")
+    # log(expm1(x)) overflows for a sufficiently deep but still valid target.
+    return float(value + math.log(-math.expm1(-value)))
+
+
+def _resolved_soft_depth_knots(
+    config: Mapping[str, Any],
+    observed_minimum: float,
+    observed_maximum: float,
+    primary_train_bins: list[float],
+) -> list[float]:
+    requested = config["loss"].get("soft_depth_balance_knots_m")
+    if requested is None:
+        values = [
+            observed_minimum,
+            *(
+                value
+                for value in primary_train_bins[1:-1]
+                if observed_minimum < float(value) < observed_maximum
+            ),
+            1.0,
+            2.0,
+            3.5,
+            5.0,
+            observed_maximum,
+        ]
+    else:
+        if not isinstance(requested, (list, tuple)):
+            raise ValueError("loss.soft_depth_balance_knots_m must be a list")
+        values = [float(value) for value in requested]
+        if len(values) < 2 or not all(np.isfinite(values)):
+            raise ValueError("loss.soft_depth_balance_knots_m must contain finite values")
+        tolerance = 1.0e-5
+        if not np.isclose(values[0], observed_minimum, rtol=0.0, atol=tolerance):
+            raise ValueError(
+                "first soft-depth knot must equal the observed canonical train minimum"
+            )
+        if not np.isclose(values[-1], observed_maximum, rtol=0.0, atol=tolerance):
+            raise ValueError(
+                "last soft-depth knot must equal the observed canonical train maximum"
+            )
+        values[0], values[-1] = observed_minimum, observed_maximum
+    knots = sorted(
+        {
+            float(value)
+            for value in values
+            if observed_minimum <= float(value) <= observed_maximum
+        }
+    )
+    if len(knots) < 2:
+        raise ValueError("resolved soft-depth knots must contain at least two distinct values")
+    if knots[0] != observed_minimum or knots[-1] != observed_maximum:
+        raise ValueError("resolved soft-depth knots must span train depth extrema")
+    return knots
+
+
+def prepare_train_only_calibration(
+    config: dict[str, Any],
+    train_dataset: FloodDepthDataset,
+) -> dict[str, Any]:
+    """Freeze depth weighting and initialization from canonical train pixels.
+
+    The returned object contains only compact scalar/statistical state, never raw
+    labels. It is safe to broadcast to DDP workers and save beside the run.
+    """
+
+    loss = config["loss"]
+    model = config["model"]
+    task_adaptive_balance = (
+        str(loss.get("objective_mode", "legacy")) == "task_adaptive"
+        and bool(loss.get("soft_depth_balance", False))
+    )
+    depth_initialization_mode = str(model.get("depth_initialization_mode", "configured"))
+    needs_scan = task_adaptive_balance or depth_initialization_mode == "train_positive_median"
+    if not needs_scan:
+        return {}
+    scan = collect_canonical_train_depths(
+        train_dataset.contract,
+        train_dataset.band_spec,
+        minimum_event_band_fraction=float(train_dataset.minimum_event_band_fraction),
+    )
+    summary = scan.summary()
+    payload: dict[str, Any] = {"train_depth_scan": summary}
+    if task_adaptive_balance:
+        knots = _resolved_soft_depth_knots(
+            config,
+            float(summary["depth_min_m"]),
+            float(summary["depth_max_m"]),
+            train_dataset.normalizer.train_depth_bins,
+        )
+        frozen = FrozenSoftDepthBalance.from_train_depths(
+            scan.depths_m,
+            knots,
+            minimum=float(loss.get("soft_depth_balance_minimum", 0.5)),
+            maximum=float(loss.get("soft_depth_balance_maximum", 3.0)),
+            alpha=float(loss.get("soft_depth_balance_alpha", 0.5)),
+            tau=float(loss.get("soft_depth_balance_tau", 10.0)),
+        )
+        payload["frozen_depth_balance"] = frozen.to_dict()
+    if depth_initialization_mode == "train_positive_median":
+        median = float(summary["depth_median_m"])
+        payload["depth_initialization"] = {
+            "source": "canonical_train_positive_depth_median",
+            "train_positive_depth_median_m": median,
+            "depth_initialization_bias": _inverse_softplus(median),
+            "head_transform": "softplus(raw_depth_bias) + uncertainty_epsilon",
+            "train_depth_scan": summary,
+        }
+    return payload
+
+
+def apply_train_only_calibration(
+    config: dict[str, Any], payload: Mapping[str, Any],
+) -> FrozenSoftDepthBalance | None:
+    """Apply broadcast train-only state to the resolved config and loss object."""
+
+    frozen_payload = payload.get("frozen_depth_balance")
+    frozen = (
+        FrozenSoftDepthBalance.from_dict(frozen_payload)
+        if isinstance(frozen_payload, Mapping)
+        else None
+    )
+    if frozen is not None:
+        config["loss"]["frozen_depth_balance_sha256"] = frozen.sha256
+        config["loss"]["frozen_depth_balance_runtime"] = "target_only_batch_invariant"
+    initialization = payload.get("depth_initialization")
+    if isinstance(initialization, Mapping):
+        bias = float(initialization["depth_initialization_bias"])
+        config["model"]["depth_initialization_bias"] = bias
+        config["model"]["depth_initialization_source"] = str(initialization["source"])
+        config["model"]["train_positive_depth_median_m"] = float(
+            initialization["train_positive_depth_median_m"]
+        )
+    return frozen
+
+
+def _calibration_artifact_paths(
+    config: Mapping[str, Any], run_dir: Path, filename: str,
+) -> list[Path]:
+    paths = [run_dir / filename]
+    configured = config.get("artifacts_root")
+    if configured is not None:
+        root = Path(configured)
+        target = root / filename
+        if target not in paths:
+            paths.append(target)
+    if filename == "frozen_depth_weights.json":
+        configured_path = config.get("loss", {}).get("frozen_depth_weights_artifact")
+        if configured_path is not None:
+            target = Path(configured_path)
+            if target not in paths:
+                paths.append(target)
+    return paths
+
+
+def write_train_only_calibration_artifacts(
+    config: Mapping[str, Any], run_dir: Path, payload: Mapping[str, Any],
+) -> None:
+    frozen = payload.get("frozen_depth_balance")
+    if isinstance(frozen, Mapping):
+        frozen_artifact = dict(frozen)
+        frozen_artifact["train_depth_scan"] = payload.get("train_depth_scan")
+        for path in _calibration_artifact_paths(config, run_dir, "frozen_depth_weights.json"):
+            atomic_write_json(path, frozen_artifact)
+    initialization = payload.get("depth_initialization")
+    if isinstance(initialization, Mapping):
+        for path in _calibration_artifact_paths(
+            config, run_dir, "train_positive_depth_initialization.json"
+        ):
+            atomic_write_json(path, dict(initialization))
+
+
+@torch.no_grad()
+def initialized_depth_distribution(
+    model: torch.nn.Module,
+    train_dataset: FloodDepthDataset,
+    input_spec: ModelInputSpec,
+    device: torch.device,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype,
+) -> dict[str, float | int]:
+    """Record an initialization-only depth distribution from one train sample."""
+
+    original_transform = train_dataset.transform
+    train_dataset.transform = None
+    try:
+        batch = default_collate([train_dataset[0]])
+    finally:
+        train_dataset.transform = original_transform
+    batch = move_to_device(batch, device, non_blocking=device.type == "cuda")
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.autocast(device_type=device.type, enabled=amp_enabled, dtype=amp_dtype):
+            outputs = model(prepare_model_inputs(batch, input_spec))
+    finally:
+        model.train(was_training)
+    values = outputs["conditional_depth"].detach().float()[
+        batch["validity"]["output_valid"] > 0.5
+    ]
+    if values.numel() == 0 or not torch.isfinite(values).all():
+        raise RuntimeError("initial depth distribution is empty or non-finite on train data")
+    quantiles = torch.quantile(values, values.new_tensor([0.05, 0.50, 0.95]))
+    return {
+        "initial_depth_valid_pixels": int(values.numel()),
+        "initial_depth_mean_m": float(values.mean().cpu()),
+        "initial_depth_p05_m": float(quantiles[0].cpu()),
+        "initial_depth_p50_m": float(quantiles[1].cpu()),
+        "initial_depth_p95_m": float(quantiles[2].cpu()),
+    }
 
 
 def cosine_warmup_scheduler(
@@ -281,7 +666,12 @@ def train_one_epoch(
     sums: dict[str, float] = {}
     batches = 0
     samples = 0
-    iterator = tqdm(loader, desc=f"train {epoch + 1}", leave=False, disable=rank != 0)
+    disable_progress = rank != 0 or os.environ.get("FLOOD_DEPTH_DISABLE_TQDM", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    iterator = tqdm(loader, desc=f"train {epoch + 1}", leave=False, disable=disable_progress)
     effective_batches = min(len(loader), max_batches or len(loader))
     accumulated_samples = 0
     optimizer_steps = 0
@@ -291,6 +681,8 @@ def train_one_epoch(
     interval_data_time = 0.0
     interval_compute_time = 0.0
     last_batch_end = interval_start
+    physics_gradient_values: dict[str, float] | None = None
+    physics_gradient_enabled = criterion.physics_weight(epoch) != 0.0
     for batch_index, cpu_batch in enumerate(iterator):
         if max_batches is not None and batch_index >= max_batches:
             break
@@ -299,58 +691,77 @@ def train_one_epoch(
         compute_start = batch_received
         batch = move_to_device(cpu_batch, device, non_blocking=non_blocking)
         batch_size = int(cpu_batch["label"].shape[0])
-        with torch.autocast(
-            device_type=device.type, enabled=amp_enabled, dtype=amp_dtype
-        ):
-            outputs = model(prepare_model_inputs(batch, input_spec))
-            loss, components = criterion(outputs, batch, epoch)
-        nonfinite = [name for name, value in components.items()
-                     if not torch.isfinite(value.detach()).all()]
-        if not torch.isfinite(loss).all() or nonfinite:
-            def value_range(value: Any) -> list[float | None]:
-                if not isinstance(value, torch.Tensor):
-                    return [None, None]
-                finite = value.detach().float()[torch.isfinite(value.detach().float())]
-                if finite.numel() == 0:
-                    return [None, None]
-                return [float(finite.min().cpu()), float(finite.max().cpu())]
-            positive_mask = batch["masks"]["valid_depth_mask"] > 0.5
-            unlabeled_mask = (
-                (batch["validity"]["output_valid"] > 0.5) & ~positive_mask
-                & ~(batch["masks"]["permanent_water_mask"] > 0.5)
-                & ~(batch["masks"]["extreme_high_mask"] > 0.5)
-            )
-            graph_payload = {
-                key: float(value.detach().float().mean().cpu())
-                for key, value in outputs.get("graph_diagnostics", {}).items()
-                if isinstance(value, torch.Tensor)
-            }
-            payload = {
-                "epoch": epoch,
-                "batch": batch_index,
-                "sample_id": str(cpu_batch.get("metadata", {}).get("sample_id", "unknown")),
-                "nonfinite_components": nonfinite,
-                "loss": float(loss.detach().float().cpu()) if torch.isfinite(loss).all() else None,
-                "prediction_range": value_range(outputs.get("depth")),
-                "target_range": value_range(batch.get("label")),
-                "uncertainty_range": value_range(outputs.get("uncertainty_scale")),
-                "positive_pixels": int(positive_mask.sum().item()),
-                "unlabeled_pixels": int(unlabeled_mask.sum().item()),
-                "graph_diagnostics": graph_payload,
-                "amp_scale": float(scaler.get_scale()),
-            }
-            if rank == 0:
-                with (run_dir / "nonfinite_losses.jsonl").open("a", encoding="utf-8") as handle:
-                    import json
-                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            raise FloatingPointError(f"Non-finite training loss at epoch={epoch}, batch={batch_index}; components={nonfinite}")
-        # Accumulate sums over samples, then normalize the complete (including
-        # short final) window once before clipping.  This prevents a singleton or
-        # max-batches remainder from receiving a full-sized update.
-        scaler.scale(loss * batch_size).backward()
-        accumulated_samples += batch_size
         final_batch = batch_index + 1 >= effective_batches
-        if (batch_index + 1) % accumulation_steps == 0 or final_batch:
+        should_step = (batch_index + 1) % accumulation_steps == 0 or final_batch
+        # Avoid an all-reduce for non-final DDP microbatches.  The context spans
+        # both forward and backward, as required by DistributedDataParallel;
+        # single-GPU behavior stays exactly unchanged.
+        sync_context = (
+            model.no_sync()
+            if isinstance(model, DistributedDataParallel)
+            and accumulation_steps > 1
+            and not should_step
+            else nullcontext()
+        )
+        with sync_context:
+            with torch.autocast(
+                device_type=device.type, enabled=amp_enabled, dtype=amp_dtype
+            ):
+                outputs = model(prepare_model_inputs(batch, input_spec))
+                loss, components = criterion(outputs, batch, epoch)
+            nonfinite = [name for name, value in components.items()
+                         if not torch.isfinite(value.detach()).all()]
+            if not torch.isfinite(loss).all() or nonfinite:
+                def value_range(value: Any) -> list[float | None]:
+                    if not isinstance(value, torch.Tensor):
+                        return [None, None]
+                    finite = value.detach().float()[torch.isfinite(value.detach().float())]
+                    if finite.numel() == 0:
+                        return [None, None]
+                    return [float(finite.min().cpu()), float(finite.max().cpu())]
+                positive_mask = canonical_positive_mask_from_batch(batch)
+                unlabeled_mask = (
+                    (batch["validity"]["output_valid"] > 0.5) & ~positive_mask
+                    & ~(batch["masks"]["permanent_water_mask"] > 0.5)
+                    & ~(batch["masks"]["extreme_high_mask"] > 0.5)
+                )
+                graph_payload = {
+                    key: float(value.detach().float().mean().cpu())
+                    for key, value in outputs.get("graph_diagnostics", {}).items()
+                    if isinstance(value, torch.Tensor)
+                }
+                payload = {
+                    "epoch": epoch,
+                    "batch": batch_index,
+                    "sample_id": str(cpu_batch.get("metadata", {}).get("sample_id", "unknown")),
+                    "nonfinite_components": nonfinite,
+                    "loss": float(loss.detach().float().cpu()) if torch.isfinite(loss).all() else None,
+                    "prediction_range": value_range(outputs.get("depth")),
+                    "target_range": value_range(batch.get("label")),
+                    "uncertainty_range": value_range(outputs.get("uncertainty_scale")),
+                    "positive_pixels": int(positive_mask.sum().item()),
+                    "unlabeled_pixels": int(unlabeled_mask.sum().item()),
+                    "graph_diagnostics": graph_payload,
+                    "amp_scale": float(scaler.get_scale()),
+                }
+                if rank == 0:
+                    with (run_dir / "nonfinite_losses.jsonl").open("a", encoding="utf-8") as handle:
+                        import json
+                        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                raise FloatingPointError(f"Non-finite training loss at epoch={epoch}, batch={batch_index}; components={nonfinite}")
+            if (
+                physics_gradient_values is None
+                and physics_gradient_enabled
+            ):
+                physics_gradient_values = _physics_output_gradient_diagnostics(
+                    outputs, components
+                )
+            # Accumulate sums over samples, then normalize the complete (including
+            # short final) window once before clipping.  This prevents a singleton
+            # or max-batches remainder from receiving a full-sized update.
+            scaler.scale(loss * batch_size).backward()
+        accumulated_samples += batch_size
+        if should_step:
             scaler.unscale_(optimizer)
             normalize_accumulated_gradients(model, accumulated_samples)
             raw_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
@@ -375,6 +786,9 @@ def train_one_epoch(
         batches += 1
         for name, value in components.items():
             sums[name] = sums.get(name, 0.0) + float(value.detach().cpu()) * batch_size
+        diagnostic_values = _training_diagnostic_values(outputs, batch)
+        for name, value in diagnostic_values.items():
+            sums[name] = sums.get(name, 0.0) + value * batch_size
         samples += batch_size
         interval_samples += batch_size
         interval_compute_time += time.perf_counter() - compute_start
@@ -433,6 +847,7 @@ def train_one_epoch(
                 "gpu_allocated_bytes": torch.cuda.memory_allocated(device) if device.type == "cuda" else 0,
                 "gpu_reserved_bytes": torch.cuda.memory_reserved(device) if device.type == "cuda" else 0,
             }
+            step_row.update(diagnostic_values)
             if modality_weights:
                 step_row.update({
                     "modality_weight_mean": float(modality_mean.detach().cpu()),
@@ -456,6 +871,14 @@ def train_one_epoch(
     # retain the per-rank value rather than treating them as sample averages.
     averaged["optimizer_steps"] = float(optimizer_steps)
     averaged["amp_skipped_steps"] = float(skipped_steps)
+    if physics_gradient_values is None:
+        physics_gradient_values = {
+            "physics_gradient_norm": 0.0,
+            "depth_gradient_norm": 0.0,
+            "physics_depth_gradient_cosine_similarity": 0.0,
+            "physics_gradient_measured": 0.0,
+        }
+    averaged.update(reduce_weighted_metrics(physics_gradient_values, 1, device))
     return averaged
 
 
@@ -497,6 +920,25 @@ def run_training(args: argparse.Namespace) -> Path:
     train_loader, val_loader, train_dataset, _ = create_dataloaders(config, rank, world_size)
     input_spec = train_dataset.input_spec
     normalizer = train_dataset.normalizer
+    calibration_payload = (
+        prepare_train_only_calibration(config, train_dataset)
+        if rank == 0
+        else None
+    )
+    calibration_payload = broadcast_object(calibration_payload, source=0)
+    if not isinstance(calibration_payload, Mapping):
+        raise RuntimeError("train-only calibration broadcast returned an invalid payload")
+    frozen_depth_balance = apply_train_only_calibration(config, calibration_payload)
+    if rank == 0:
+        write_train_only_calibration_artifacts(config, run_dir, calibration_payload)
+    if frozen_depth_balance is not None:
+        LOGGER.info(
+            "frozen soft-depth balance sha256=%s train_mean=%.8f bounds=[%.3f, %.3f]",
+            frozen_depth_balance.sha256,
+            frozen_depth_balance.train_weight_mean,
+            frozen_depth_balance.train_weight_min,
+            frozen_depth_balance.train_weight_max,
+        )
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
     prior_config = config["dataset"]["positive_prior"]
     prior = normalizer.positive_prior if prior_config["mode"] == "auto" else float(prior_config["value"])
@@ -505,6 +947,10 @@ def run_training(args: argparse.Namespace) -> Path:
     LOGGER.info("nnPU positive prior=%f method=%s", prior, prior_config["mode"])
     LOGGER.info("train-only depth stratification edges (m)=%s", depth_bins)
 
+    amp_enabled, amp_dtype, scaler_enabled = resolve_amp(
+        device, bool(config["training"]["amp"]),
+        str(config["training"].get("amp_dtype", "float16")),
+    )
     model = build_model(config).to(device)
     parent_checkpoint = None
     if args.init_checkpoint is not None:
@@ -519,6 +965,20 @@ def run_training(args: argparse.Namespace) -> Path:
             LOGGER.warning(
                 "init checkpoint has no EMA state; initializing the new stage from raw weights"
             )
+    if rank == 0 and isinstance(calibration_payload.get("depth_initialization"), Mapping):
+        initialization = dict(calibration_payload["depth_initialization"])
+        initialization.update(
+            initialized_depth_distribution(
+                model,
+                train_dataset,
+                input_spec,
+                device,
+                amp_enabled,
+                amp_dtype,
+            )
+        )
+        calibration_payload = {**dict(calibration_payload), "depth_initialization": initialization}
+        write_train_only_calibration_artifacts(config, run_dir, calibration_payload)
     total_parameters = sum(parameter.numel() for parameter in model.parameters())
     trainable_parameters = sum(
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
@@ -545,10 +1005,6 @@ def run_training(args: argparse.Namespace) -> Path:
         config, train_loader, epochs, accumulation, args.max_train_batches
     )
     scheduler = build_scheduler(optimizer, config, total_steps, warmup_steps)
-    amp_enabled, amp_dtype, scaler_enabled = resolve_amp(
-        device, bool(config["training"]["amp"]),
-        str(config["training"].get("amp_dtype", "float16")),
-    )
     scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     ema = ModelEMA(
         model, float(config["training"].get("ema_decay", 0.999)),
@@ -556,7 +1012,7 @@ def run_training(args: argparse.Namespace) -> Path:
     ) if bool(config["training"].get("ema_enabled", False)) else None
     criterion = CompositeFloodDepthLoss(
         config["loss"], prior, depth_bins, normalizer.train_depth_bins,
-        normalizer.train_depth_bin_counts,
+        normalizer.train_depth_bin_counts, frozen_depth_balance,
     )
     fingerprint = dataset_fingerprint(config)
     monitor = str(config["training"]["best_metric"])
@@ -588,8 +1044,12 @@ def run_training(args: argparse.Namespace) -> Path:
             expected_legacy_training_identity_sha256=legacy_identity,
             expected_legacy_v1_training_identity_sha256=legacy_v1_identity,
         )
-        if ema is not None and checkpoint.get("ema") is not None:
-            ema.load_state_dict(checkpoint["ema"])
+        if ema is not None:
+            restored_ema = restore_ema_after_checkpoint_load(ema, checkpoint, model)
+            if not restored_ema:
+                LOGGER.warning(
+                    "resume checkpoint has no EMA state; reset EMA from loaded raw model weights"
+                )
         checkpoint_monitor = str(
             checkpoint.get("extra", {}).get("best_metric_name", "event_macro_mae")
         )
@@ -647,10 +1107,17 @@ def run_training(args: argparse.Namespace) -> Path:
             derived_seed = int(config["seed"]) + rank + 1_000_003 * start_epoch
             seed_everything(derived_seed, bool(config["deterministic"]))
             train_loader.generator.manual_seed(derived_seed)
-            val_loader.generator.manual_seed(derived_seed + 1)
+            val_loader.generator.manual_seed(derived_seed + 100_000)
         LOGGER.info("Resumed %s at epoch %d", args.resume, start_epoch)
 
-    writer = SummaryWriter(run_dir / "tensorboard") if rank == 0 and config["logging"]["tensorboard"] else None
+    writer = None
+    if rank == 0 and config["logging"]["tensorboard"]:
+        # TensorBoard is an optional observability dependency.  Import it only
+        # for a run that explicitly enables it, so tests and command-line tools
+        # remain usable in minimal environments.
+        from torch.utils.tensorboard import SummaryWriter
+
+        writer = SummaryWriter(run_dir / "tensorboard")
     if rank == 0:
         atomic_write_json(run_dir / "resolved_config.json", jsonable_config(config))
         atomic_write_json(run_dir / "environment.json", environment_payload(device))
@@ -676,6 +1143,11 @@ def run_training(args: argparse.Namespace) -> Path:
                 "primary_depth_stratification_edges_m": normalizer.train_depth_bins,
                 "resolved_model_bands": config["dataset"].get("resolved_model_bands"),
                 "amp_dtype": str(amp_dtype),
+                "graph_identity": resolved_graph_identity(config),
+                "frozen_depth_balance_sha256": config["loss"].get(
+                    "frozen_depth_balance_sha256"
+                ),
+                "depth_initialization": calibration_payload.get("depth_initialization"),
             },
         )
     start_time = time.perf_counter()
@@ -741,6 +1213,7 @@ def run_training(args: argparse.Namespace) -> Path:
                                 "early_stop_patience": patience,
                                 "best_raw_metric": best_raw_metric,
                                 "best_ema_metric": best_ema_metric,
+                                "graph_identity": runtime_graph_identity(model),
                             },
                             ema=ema,
                             training_context=training_context,
@@ -842,6 +1315,7 @@ def run_training(args: argparse.Namespace) -> Path:
                         "early_stop_patience": patience,
                         "best_raw_metric": best_raw_metric,
                         "best_ema_metric": best_ema_metric,
+                        "graph_identity": runtime_graph_identity(model),
                     },
                 )
                 if bool(config["checkpoint"]["save_last"]):

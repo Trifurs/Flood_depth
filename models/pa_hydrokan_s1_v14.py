@@ -154,19 +154,26 @@ class PAHydroKANS1V14(nn.Module):
             else nn.Identity()
         )
         self.graph_enabled = bool(model_config.get("graph_enabled", True))
+        self.actual_graph_feature_stride = 8
+        self.graph_descriptor_stride = int(model_config.get("graph_scale", 4))
+        self._last_graph_feature_shape: tuple[int, int] | None = None
         self.graph = HydroEdgeKANS1(
             channels[-1],
             heads=int(model_config.get("graph_heads", 2)),
             grid_size=int(model_config.get("kan_grid_size", 4)),
             spline_order=int(model_config.get("kan_spline_order", 3)),
-            graph_scale=int(model_config.get("graph_scale", 4)),
+            graph_feature_stride=self.graph_descriptor_stride,
             terrain_pixel_size_m=float(model_config.get("terrain_pixel_size_m", 20.0)),
             feature_centers=model_config.get("graph_feature_centers"),
             feature_scales=model_config.get("graph_feature_scales"),
             gamma_init_effective=float(model_config.get("kan_gamma_init_effective", 0.02)),
             gamma_max=float(model_config.get("kan_gamma_max", 0.25)),
             latent_compatibility_enabled=bool(model_config.get("latent_compatibility_enabled", True)),
-            diagnostic_mode=bool(model_config.get("diagnostic_mode", False)),
+            diagnostics_enabled=bool(
+                model_config.get(
+                    "diagnostics_enabled", model_config.get("diagnostic_mode", False)
+                )
+            ),
         )
         widths = model_config.get("decoder_widths", [96, 64, 48, 32])
         self.decoder = SARHydroDecoder(
@@ -178,7 +185,7 @@ class PAHydroKANS1V14(nn.Module):
             int(model_config.get("auxiliary_count", 1)),
         )
         self.heads = S1DepthHeads(
-            32,
+            int(widths[-1]),
             groups,
             float(model_config.get("uncertainty_epsilon", 0.001)),
             float(model_config.get("uncertainty_maximum", 5.0)),
@@ -186,6 +193,18 @@ class PAHydroKANS1V14(nn.Module):
             bool(model_config.get("uncertainty_backbone_gradient", False)),
             model_config.get("depth_initialization_bias"),
         )
+
+    def graph_identity(self) -> dict[str, Any]:
+        return {
+            "legacy_configured_graph_scale": self.graph_descriptor_stride,
+            "actual_graph_feature_stride": self.actual_graph_feature_stride,
+            "legacy_node_spacing_m_used": self.graph.graph_pixel_size_m,
+            "graph_feature_shape": (
+                list(self._last_graph_feature_shape)
+                if self._last_graph_feature_shape is not None
+                else None
+            ),
+        }
 
     def forward(self, inputs: Mapping[str, torch.Tensor]) -> dict[str, Any]:
         forbidden = set(S1_FORBIDDEN_INPUTS).intersection(inputs)
@@ -218,6 +237,7 @@ class PAHydroKANS1V14(nn.Module):
         bottleneck = self.context(fused[-1])
         observation_confidence = sar_diagnostics["quality_gates"][-1]
         if self.graph_enabled:
+            self._last_graph_feature_shape = tuple(int(value) for value in bottleneck.shape[-2:])
             bottleneck, graph_diagnostics = self.graph(
                 bottleneck,
                 physical,

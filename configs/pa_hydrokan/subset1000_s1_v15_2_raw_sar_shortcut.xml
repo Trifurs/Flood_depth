@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <!-- Experiment 7: the selected Graph+KAN+weak-physics combination plus
+       only the small absolute event-VV/VH residual pathway. -->
+  <include path="subset1000_s1_v15_2_combined.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_2_raw_sar_shortcut</run_name>
+  <model>
+    <absolute_sar_shortcut_enabled type="bool">true</absolute_sar_shortcut_enabled>
+  </model>
+</config>

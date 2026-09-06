@@ -19,12 +19,18 @@ from losses.physics_losses import (
     reference_gated_wse_gradient_loss,
     terrain_order_violation_loss,
     tolerant_wse_slope_loss,
+    weak_physics_pair_loss,
     weak_wse_laplacian_loss,
 )
 from losses.pu_loss import nnpu_logistic_loss
 from losses.multiscale_losses import auxiliary_depth_loss, masked_gradient_consistency_loss
 from datasets.preprocessing import RELIABILITY_NAMES
+from datasets.supervision_masks import (
+    canonical_positive_mask_from_batch,
+    supervision_mask_counts,
+)
 from losses.task_adaptive_depth_loss import task_adaptive_positive_depth_loss
+from losses.frozen_soft_depth_balance import FrozenSoftDepthBalance
 
 
 def _reliability_names(batch: Mapping[str, Any]) -> tuple[str, ...]:
@@ -67,6 +73,7 @@ class CompositeFloodDepthLoss(nn.Module):
         train_depth_bins: Sequence[float] | None = None,
         primary_depth_bins: Sequence[float] | None = None,
         train_depth_bin_counts: Sequence[float] | None = None,
+        frozen_depth_balance: FrozenSoftDepthBalance | None = None,
     ) -> None:
         super().__init__()
         self.config = dict(loss_config)
@@ -79,6 +86,7 @@ class CompositeFloodDepthLoss(nn.Module):
             float(value) for value in (primary_depth_bins or ())
         )
         self.train_depth_bin_counts = tuple(float(value) for value in (train_depth_bin_counts or ()))
+        self.frozen_depth_balance = frozen_depth_balance
 
     def wse_weight(self, epoch: int) -> float:
         target = float(self.config["lambda_wse"])
@@ -89,6 +97,30 @@ class CompositeFloodDepthLoss(nn.Module):
         if epoch < start:
             return 0.0
         return target * min(1.0, (epoch - start + 1) / warmup)
+
+    def physics_weight(self, epoch: int) -> float:
+        """Schedule the explicitly local S1+terrain weak-physics candidate."""
+
+        target = float(
+            self.config.get("lambda_phys", self.config.get("lambda_physics", 0.0))
+        )
+        if target < 0.0:
+            raise ValueError("lambda_phys must be nonnegative")
+        start = int(
+            self.config.get(
+                "phys_start_epoch", self.config.get("physics_start_epoch", 15)
+            )
+        )
+        warmup = int(
+            self.config.get(
+                "phys_warmup_epochs", self.config.get("physics_warmup_epochs", 10)
+            )
+        )
+        if start < 0 or warmup < 0:
+            raise ValueError("physics start epoch and warmup epochs must be nonnegative")
+        if epoch < start or target == 0.0:
+            return 0.0
+        return target if warmup == 0 else target * min(1.0, (epoch - start + 1) / warmup)
 
     def scheduled_weight(self, name: str, epoch: int) -> float:
         target = float(self.config.get(f"lambda_{name}", 0.0))
@@ -118,7 +150,10 @@ class CompositeFloodDepthLoss(nn.Module):
         label = batch["label"]
         masks = batch["masks"]
         validity = batch["validity"]
-        positive = masks["valid_depth_mask"] > 0.5
+        # Every depth-bearing objective receives the exact same output-aware
+        # supervision domain.  Do not derive a second mask inside individual
+        # loss terms.
+        positive = canonical_positive_mask_from_batch(batch)
         unlabeled = (
             (validity["output_valid"] > 0.5)
             & ~positive
@@ -146,6 +181,7 @@ class CompositeFloodDepthLoss(nn.Module):
         effective_kan = self.scheduled_weight("kan", epoch)
         effective_tail = self.scheduled_weight("tail", epoch)
         effective_wse = self.wse_weight(epoch)
+        effective_physics = self.physics_weight(epoch)
         zero = label.sum() * 0.0
         lambda_final = float(self.config["lambda_final"])
         prediction = outputs.get("conditional_depth", outputs["positive_depth"])
@@ -160,6 +196,8 @@ class CompositeFloodDepthLoss(nn.Module):
                 balance_alpha=float(self.config.get("soft_depth_balance_alpha", 0.5)),
                 balance_tau=float(self.config.get("soft_depth_balance_tau", 10.0)),
                 train_bin_counts=self.train_depth_bin_counts or None,
+                frozen_depth_balance=self.frozen_depth_balance,
+                log_beta=float(self.config.get("log_depth_huber_beta", 1.0)),
             )
         else:
             components = positive_depth_losses(
@@ -228,7 +266,15 @@ class CompositeFloodDepthLoss(nn.Module):
             auxiliary_depth_loss(
                 outputs.get("auxiliary_depths", ()), label, positive,
                 self.config.get("auxiliary_depth_weights", ()),
-                float(self.config.get("depth_huber_beta_m", 1.0)),
+                # The auxiliary head is a fixed supporting objective.  Keep its
+                # transition independent from the primary-depth beta so a
+                # primary beta ablation remains a genuine one-variable test.
+                float(
+                    self.config.get(
+                        "auxiliary_huber_beta_m",
+                        self.config.get("depth_huber_beta_m", 1.0),
+                    )
+                ),
             ) if effective_auxiliary != 0.0 else (zero, [])
         )
         components["auxiliary"] = auxiliary
@@ -325,6 +371,74 @@ class CompositeFloodDepthLoss(nn.Module):
                 f"'reference_gated_gradient', 'terrain_order', 'v14_terrain_order', or 'v14_wse_slope', got {wse_mode!r}"
             )
         components["wse"] = wse
+        if effective_physics == 0.0:
+            physics = zero
+            physics_diagnostics = {
+                "active_pair_fraction": zero,
+                "active_pair_count": zero,
+                "candidate_pair_count": zero,
+                "mean_violation_m": zero,
+                "p90_violation_m": zero,
+                "mean_sar_compatibility": zero,
+                "mean_barrier_weight": zero,
+                "mean_complexity_weight": zero,
+                "pair_weight_sum": zero,
+            }
+        else:
+            physical = outputs["physical_features"]
+            physics, physics_diagnostics = weak_physics_pair_loss(
+                prediction,
+                physical["physics_elevation"],
+                physical["dsm_elevation"],
+                physical["z_ground_proxy"],
+                physical["local_relief"],
+                positive,
+                validity["dem_valid"],
+                validity["s1_valid"],
+                batch["s1_change"],
+                mode=str(self.config.get("physics_mode", "terrain_order_margin")),
+                elevation_tolerance_m=float(
+                    self.config.get("physics_elevation_tolerance_m", 0.05)
+                ),
+                maximum_elevation_step_m=float(
+                    self.config.get("physics_maximum_elevation_step_m", 0.75)
+                ),
+                depth_tolerance_m=float(
+                    self.config.get("physics_depth_tolerance_m", 0.02)
+                ),
+                order_softplus_temperature_m=float(
+                    self.config.get("physics_order_softplus_temperature_m", 0.05)
+                ),
+                allowed_depth_jump_m=float(
+                    self.config.get("physics_allowed_depth_jump_m", 0.25)
+                ),
+                barrier_sigma_m=float(
+                    self.config.get("physics_barrier_sigma_m", 0.75)
+                ),
+                complexity_sigma_m=float(
+                    self.config.get("physics_complexity_sigma_m", 12.0)
+                ),
+                maximum_complexity_m=float(
+                    self.config.get("physics_maximum_complexity_m", 12.0)
+                ),
+                sar_compatibility_sigma=float(
+                    self.config.get("physics_sar_compatibility_sigma", 1.0)
+                ),
+                wse_consistency_tolerance_m=float(
+                    self.config.get("physics_wse_consistency_tolerance_m", 0.10)
+                ),
+                wse_consistency_softplus_temperature_m=float(
+                    self.config.get(
+                        "physics_wse_consistency_softplus_temperature_m", 0.05
+                    )
+                ),
+                wse_consistency_maximum_barrier_m=float(
+                    self.config.get("physics_wse_consistency_maximum_barrier_m", 3.0)
+                ),
+            )
+        components["physics"] = physics
+        for name, value in physics_diagnostics.items():
+            components[f"physics_{name}"] = value
         if effective_kan != 0.0:
             kan_magnitude = outputs.get("graph_diagnostics", {}).get(
                 "kan_coefficient_magnitude", zero
@@ -350,18 +464,24 @@ class CompositeFloodDepthLoss(nn.Module):
             + effective_gradient * gradient
             + effective_auxiliary * auxiliary
             + effective_wse * wse
+            + effective_physics * physics
             + effective_kan * (kan_magnitude + kan_smoothness)
             + float(self.config.get("lambda_kan_mono", 0.0)) * components["kan_monotonicity"]
             + float(self.config.get("lambda_kan_smooth", 0.0)) * components["kan_curve_smoothness"]
         )
         components["total"] = total
         components["wse_effective_weight"] = total.new_tensor(effective_wse)
+        components["physics_effective_weight"] = total.new_tensor(effective_physics)
         components["pu_effective_weight"] = total.new_tensor(effective_pu)
         components["unc_effective_weight"] = total.new_tensor(effective_unc)
         components["gradient_effective_weight"] = total.new_tensor(effective_gradient)
         components["auxiliary_effective_weight"] = total.new_tensor(effective_auxiliary)
         components["kan_effective_weight"] = total.new_tensor(effective_kan)
         components["tail_effective_weight"] = total.new_tensor(effective_tail)
-        components["positive_pixels"] = total.new_tensor(float(positive.sum().item()))
+        mask_counts = supervision_mask_counts(batch)
+        components.update(mask_counts)
+        # Compatibility aliases retained for existing CSV consumers.  Their value
+        # is now the canonical count rather than label validity alone.
+        components["positive_pixels"] = components["positive_supervision_pixels"]
         components["unlabeled_pixels"] = total.new_tensor(float(unlabeled.sum().item()))
         return total, components

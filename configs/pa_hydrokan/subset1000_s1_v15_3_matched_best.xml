@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_v15_3_common.xml" />
+  <!-- Strict re-trained current-best reference for every V15.3 candidate. -->
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_3_matched_current_best</run_name>
+  <model>
+    <name type="str">pa_hydrokan_s1_v15</name>
+    <graph_feature_stride type="int">8</graph_feature_stride>
+    <graph_scale type="int">8</graph_scale>
+    <graph_heads type="int">2</graph_heads>
+    <kan_grid_size type="int">4</kan_grid_size>
+    <kan_spline_order type="int">3</kan_spline_order>
+    <kan_gamma_init_effective type="float">0.06</kan_gamma_init_effective>
+    <kan_gamma_max type="float">0.35</kan_gamma_max>
+  </model>
+  <loss>
+    <lambda_phys type="float">0.0</lambda_phys>
+  </loss>
+</config>

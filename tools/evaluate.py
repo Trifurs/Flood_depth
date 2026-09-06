@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -21,6 +22,12 @@ from datasets.flooddepth_dataset import FloodDepthDataset, prepare_model_inputs
 from datasets.preprocessing import RELIABILITY_NAMES, RobustNormalizer, resolve_depth_stratification_bins, reliability_spec_for_mode
 from datasets.model_input_spec import ModelInputSpec
 from datasets.reliability_spec import ReliabilitySpec
+from datasets.supervision_masks import (
+    CANONICAL_POSITIVE_MASK,
+    canonical_positive_mask_from_batch,
+    supervision_mask_counts,
+    validate_supervision_config,
+)
 
 
 def _batch_reliability_names(batch: dict[str, Any]) -> tuple[str, ...]:
@@ -39,6 +46,10 @@ def _batch_reliability_names(batch: dict[str, Any]) -> tuple[str, ...]:
         return _batch_reliability_names({"reliability_names": metadata.get("reliability_names")})
     return RELIABILITY_NAMES
 from losses.composite_loss import CompositeFloodDepthLoss
+from losses.frozen_soft_depth_balance import (
+    FrozenSoftDepthBalance,
+    load_frozen_soft_depth_balance,
+)
 from metrics.aggregator import EvaluationAggregator
 from metrics.physical_metrics import (
     local_wse_laplacian,
@@ -53,7 +64,31 @@ from utils.logging import setup_logging, write_rows
 from utils.misc import atomic_write_json, move_to_device
 from utils.raster_io import write_geotiff
 from utils.registry import build_model
+
+
+def frozen_depth_balance_for_config(config: dict[str, Any]) -> FrozenSoftDepthBalance | None:
+    """Resolve the train-only frozen curve required by task-adaptive evaluation."""
+
+    loss = config.get("loss", {})
+    if not (
+        str(loss.get("objective_mode", "legacy")) == "task_adaptive"
+        and bool(loss.get("soft_depth_balance", False))
+    ):
+        return None
+    path = loss.get("frozen_depth_weights_artifact")
+    if path is None and config.get("artifacts_root") is not None:
+        path = Path(config["artifacts_root"]) / "frozen_depth_weights.json"
+    if path is None:
+        raise ValueError(
+            "task-adaptive soft depth balance requires a frozen_depth_weights_artifact"
+        )
+    balance = load_frozen_soft_depth_balance(path)
+    expected = loss.get("frozen_depth_balance_sha256")
+    if expected is not None and str(expected) != balance.sha256:
+        raise ValueError("configured frozen soft-depth SHA-256 does not match artifact")
+    return balance
 from utils.visualization import save_prediction_panel
+from utils.graph_metadata import resolved_graph_identity, runtime_graph_identity
 from datasets.contract import DatasetContract, sha256_file
 from datasets.band_selection import resolve_band_spec
 
@@ -70,12 +105,17 @@ def dataset_fingerprint(config: dict[str, Any]) -> dict[str, str]:
         fingerprint["model_input_spec_sha256"] = input_spec.sha256
         fingerprint["active_groups_sha256"] = input_spec.active_groups_sha256
         fingerprint["reliability_spec_sha256"] = ReliabilitySpec.from_mode(input_spec.mode).sha256
+    edge_stats = config.get("model", {}).get("graph_edge_stats")
+    if edge_stats is not None:
+        path = Path(edge_stats).expanduser().resolve(strict=True)
+        fingerprint["graph_edge_stats_sha256"] = sha256_file(path)
     return fingerprint
 
 
 def embed_source_fingerprints(config: dict[str, Any]) -> dict[str, Any]:
     """Place audited key-source hashes into every saved resolved configuration."""
 
+    validate_supervision_config(config)
     contract = DatasetContract.load(config["dataset"]["contract"])
     config["dataset"]["source_file_sha256"] = dict(contract.payload["key_file_sha256"])
     config["dataset"]["contract_sha256"] = contract.hash
@@ -90,6 +130,13 @@ def embed_source_fingerprints(config: dict[str, Any]) -> dict[str, Any]:
     config["dataset"]["resolved_reliability_schema"] = list(
         reliability_spec_for_mode(input_spec.mode).names
     )
+    edge_stats = config.get("model", {}).get("graph_edge_stats")
+    if edge_stats is not None:
+        path = Path(edge_stats).expanduser().resolve(strict=True)
+        config["model"]["graph_edge_stats_sha256"] = sha256_file(path)
+    graph_identity = resolved_graph_identity(config)
+    if graph_identity is not None:
+        config["model"]["resolved_graph_identity"] = graph_identity
     return config
 
 
@@ -129,11 +176,25 @@ def evaluate_loader(
     component_values: dict[str, list[float]] = {}
     event_depth_scales: list[float] = []
     support_branch_seen = False
-    iterator = tqdm(loader, desc="evaluate", leave=False, disable=not progress)
+    mask_totals = {
+        "valid_depth_mask_pixels": 0,
+        "output_valid_pixels": 0,
+        "positive_supervision_pixels": 0,
+        "positive_excluded_by_output_valid_pixels": 0,
+    }
+    disable_progress = (not progress) or os.environ.get("FLOOD_DEPTH_DISABLE_TQDM", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    iterator = tqdm(loader, desc="evaluate", leave=False, disable=disable_progress)
     for batch_index, cpu_batch in enumerate(iterator):
         if max_batches is not None and batch_index >= max_batches:
             break
         batch = move_to_device(cpu_batch, device)
+        batch_mask_counts = supervision_mask_counts(batch)
+        for name in mask_totals:
+            mask_totals[name] += int(batch_mask_counts[name].detach().cpu())
         reliability_names = _batch_reliability_names(cpu_batch)
         reliability_index = {name: index for index, name in enumerate(reliability_names)}
         with torch.autocast(
@@ -175,8 +236,14 @@ def evaluate_loader(
             positive_mask = (
                 batch["masks"]["valid_depth_mask"][sample_index].detach().cpu().numpy() > 0.5
             )
-            metric_valid_mask = positive_mask
-            if validity_mask is not None:
+            canonical_mask = (
+                canonical_positive_mask_from_batch(batch)[sample_index]
+                .detach()
+                .cpu()
+                .numpy()
+            )
+            metric_valid_mask = canonical_mask
+            if validity_mask not in {None, CANONICAL_POSITIVE_MASK, "output_valid"}:
                 if validity_mask == "common_s1":
                     metric_valid_mask = positive_mask & (
                         batch["validity"]["s1_event_support"][sample_index].detach().cpu().numpy() > 0.5
@@ -326,7 +393,7 @@ def evaluate_loader(
                     target=target[0],
                     prediction=prediction[0],
                     uncertainty=scale[0],
-                    valid_label=positive_mask[0],
+                    valid_label=canonical_mask[0],
                 )
                 atomic_write_json(sample_dir / "metrics.json", row)
     summary, sample_rows, event_rows, bin_rows = aggregator.summarize()
@@ -338,8 +405,20 @@ def evaluate_loader(
             "unknown",
         )
     )
-    summary["evaluation_validity_mask"] = validity_mask or "label_valid_mask"
+    summary["evaluation_validity_mask"] = (
+        CANONICAL_POSITIVE_MASK
+        if validity_mask in {None, CANONICAL_POSITIVE_MASK, "output_valid"}
+        else str(validity_mask)
+    )
+    summary.update(mask_totals)
+    summary["positive_excluded_by_output_valid_fraction"] = (
+        float(mask_totals["positive_excluded_by_output_valid_pixels"])
+        / max(float(mask_totals["valid_depth_mask_pixels"]), 1.0)
+    )
     summary["support_probability_reported"] = support_branch_seen
+    graph_identity = runtime_graph_identity(unwrapped)
+    if graph_identity is not None:
+        summary["graph_identity"] = graph_identity
     if event_depth_scales:
         scale_array = np.asarray(event_depth_scales, dtype=np.float64)
         summary["event_depth_scale_mean"] = float(scale_array.mean())
@@ -379,6 +458,10 @@ def run_evaluation(
         config["dataset"]["contract"], config["dataset"]["train_stats"], split,
         band_spec=band_spec,
         input_spec=input_spec,
+        minimum_event_band_fraction=float(
+            config["dataset"].get("minimum_event_band_fraction", 1.0)
+        ),
+        s1_qa_names=config["dataset"].get("model_s1_qa_names"),
     )
     loader = DataLoader(
         dataset,
@@ -414,6 +497,7 @@ def run_evaluation(
     criterion = CompositeFloodDepthLoss(
         config["loss"], prior, depth_bins, normalizer.train_depth_bins,
         normalizer.train_depth_bin_counts,
+        frozen_depth_balance_for_config(config),
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     summary, samples, events, bins = evaluate_loader(
@@ -435,7 +519,7 @@ def run_evaluation(
             else torch.float16
         ),
         input_spec=input_spec,
-        validity_mask=validity_mask,
+        validity_mask=validity_mask or CANONICAL_POSITIVE_MASK,
     )
     summary["checkpoint_epoch"] = checkpoint_epoch
     summary["weights"] = weights
@@ -457,7 +541,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--max-batches", type=int)
     parser.add_argument("--weights", choices=("raw", "ema"), default="raw")
-    parser.add_argument("--validity-mask", choices=("output_valid", "common_s1", "s1_event_support"))
+    parser.add_argument(
+        "--validity-mask",
+        choices=(CANONICAL_POSITIVE_MASK, "output_valid", "common_s1", "s1_event_support"),
+    )
     parser.add_argument("--output-semantics", choices=("conditional_positive_v2", "probability_weighted_v1"))
     return parser.parse_args()
 

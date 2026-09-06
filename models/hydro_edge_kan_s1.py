@@ -47,7 +47,7 @@ class HydroEdgeKANS1(nn.Module):
         heads: int = 2,
         grid_size: int = 4,
         spline_order: int = 3,
-        graph_scale: int = 4,
+        graph_feature_stride: int = 4,
         terrain_pixel_size_m: float = 20.0,
         feature_centers: Sequence[float] | None = None,
         feature_scales: Sequence[float] | None = None,
@@ -55,12 +55,14 @@ class HydroEdgeKANS1(nn.Module):
         gamma_max: float = 0.25,
         latent_compatibility_enabled: bool = True,
         diagnostic_mode: bool = False,
+        diagnostics_enabled: bool | None = None,
+        p0_corrected: bool = False,
     ) -> None:
         super().__init__()
         if heads not in {2, 4} or channels % heads:
             raise ValueError("HydroEdgeKANS1 heads must be 2 or 4 and divide channels")
-        if graph_scale not in {4, 8}:
-            raise ValueError("HydroEdgeKANS1 graph_scale must be 4 or 8")
+        if graph_feature_stride not in {4, 8}:
+            raise ValueError("HydroEdgeKANS1 graph_feature_stride must be 4 or 8")
         if terrain_pixel_size_m <= 0 or gamma_max <= 0 or not 0 <= gamma_init_effective < gamma_max:
             raise ValueError("invalid graph scale, pixel size, or gamma bounds")
         centers = list(feature_centers or [0.0] * 6)
@@ -70,11 +72,21 @@ class HydroEdgeKANS1(nn.Module):
         self.channels = int(channels)
         self.heads = int(heads)
         self.head_channels = channels // heads
-        self.graph_scale = int(graph_scale)
-        self.graph_pixel_size_m = float(graph_scale) * float(terrain_pixel_size_m)
+        self.graph_feature_stride = int(graph_feature_stride)
+        # ``graph_scale`` is retained as a read-only compatibility alias for
+        # historical diagnostics; its value is the verified feature stride.
+        self.graph_scale = self.graph_feature_stride
+        self.graph_pixel_size_m = (
+            float(self.graph_feature_stride) * float(terrain_pixel_size_m)
+        )
         self.gamma_max = float(gamma_max)
         self.latent_compatibility_enabled = bool(latent_compatibility_enabled)
-        self.diagnostic_mode = bool(diagnostic_mode)
+        self.p0_corrected = bool(p0_corrected)
+        self.diagnostic_mode = (
+            bool(diagnostic_mode)
+            if diagnostics_enabled is None
+            else bool(diagnostics_enabled)
+        )
         self.edge_feature_names = S1_EDGE_FEATURE_NAMES
         self.register_buffer(
             "feature_centers",
@@ -89,7 +101,9 @@ class HydroEdgeKANS1(nn.Module):
                 KANLinear(
                     6, 1, grid_size, spline_order,
                     normalization="explicit_fixed_scaling",
-                    input_bounding="prebounded",
+                    input_bounding=(
+                        "prebounded" if self.p0_corrected else "legacy_prebounded"
+                    ),
                     base_path="none",
                     base_scale_init=0.0,
                     spline_scale_init=1.0,
@@ -131,6 +145,24 @@ class HydroEdgeKANS1(nn.Module):
     @property
     def prior_scales(self) -> torch.Tensor:
         return F.softplus(self.prior_raw_scales)
+
+    @property
+    def neighbour_distances_m(self) -> tuple[float, ...]:
+        return tuple(
+            self.graph_pixel_size_m * math.sqrt(dx * dx + dy * dy)
+            for dy, dx in DIRECTIONS
+        )
+
+    def graph_identity(self, feature_shape: tuple[int, int] | None = None) -> dict[str, Any]:
+        """Serializable verified graph-scale metadata."""
+
+        return {
+            "graph_feature_stride": self.graph_feature_stride,
+            "graph_node_spacing_m": self.graph_pixel_size_m,
+            "graph_feature_shape": list(feature_shape) if feature_shape else None,
+            "orthogonal_neighbour_distance_m": self.graph_pixel_size_m,
+            "diagonal_neighbour_distance_m": self.graph_pixel_size_m * math.sqrt(2.0),
+        }
 
     def spline_regularization(self) -> tuple[torch.Tensor, torch.Tensor]:
         coefficients = torch.cat(
@@ -184,13 +216,13 @@ class HydroEdgeKANS1(nn.Module):
         neighbour_z, boundary = self._stack_roll(z)
         neighbour_relative, _ = self._stack_roll(relative)
         neighbour_relief, _ = self._stack_roll(relief)
-        distance_values = [self.graph_pixel_size_m * math.sqrt(dx * dx + dy * dy) for dy, dx in DIRECTIONS]
+        distance_values = list(self.neighbour_distances_m)
         distance = z.new_tensor(distance_values).view(1, len(DIRECTIONS), 1, 1, 1)
         signed_dz = (neighbour_z - z.unsqueeze(1)) / distance.clamp_min(1.0e-6)
         edge_slope = signed_dz.abs()
         relative_height = 0.5 * (relative.unsqueeze(1) + neighbour_relative)
         path_barrier, path_valid = path_barrier_proxy(
-            physical["dsm_elevation"], dem_full, self.graph_scale,
+            physical["dsm_elevation"], dem_full, self.graph_feature_stride,
             physical["z_ground_proxy"], statistic="max", quantile=0.9,
         )
         path_barrier = torch.stack(
@@ -209,9 +241,13 @@ class HydroEdgeKANS1(nn.Module):
             (signed_dz, edge_slope, relative_height, path_barrier, relief_pair, distance_normalized),
             dim=2,
         )
-        descriptor = (
-            (raw - self.feature_centers.to(raw.dtype)) / self.feature_scales.to(raw.dtype)
-        ).clamp(-4.0, 4.0)
+        normalized = (
+            (raw - self.feature_centers.to(raw.dtype))
+            / self.feature_scales.to(raw.dtype)
+        )
+        # Historical V15 checkpoints retain their original [-4, 4] plus KAN
+        # clamp behavior.  Corrected candidates use exactly one robust tanh map.
+        descriptor = torch.tanh(normalized) if self.p0_corrected else normalized.clamp(-4.0, 4.0)
         valid_edge = node_valid.unsqueeze(1) * self._stack_roll(node_valid)[0] * boundary * path_valid
         return descriptor, raw, valid_edge, dem_fraction, sensor_fraction
 
@@ -221,7 +257,18 @@ class HydroEdgeKANS1(nn.Module):
         physical: Mapping[str, torch.Tensor],
         sensor_valid: torch.Tensor,
         observation_confidence: torch.Tensor | None = None,
+        *,
+        feature_stride: int | None = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
+        if (
+            self.p0_corrected
+            and feature_stride is not None
+            and int(feature_stride) != self.graph_feature_stride
+        ):
+            raise ValueError(
+                "HydroEdgeKANS1 feature-stride mismatch: configured "
+                f"{self.graph_feature_stride}, received {feature_stride}"
+            )
         size = features.shape[-2:]
         descriptor, raw, valid_edge, dem_fraction, sensor_fraction = self._descriptors(
             physical, size, sensor_valid
@@ -238,12 +285,17 @@ class HydroEdgeKANS1(nn.Module):
         )
         neighbour_features, _ = self._stack_roll(features)
         messages, affinities, gates = [], [], []
+        compatibilities, kan_logits, base_outputs, spline_outputs = [], [], [], []
         prior = -(raw * self.prior_scales.view(1, 1, 6, 1, 1)).sum(dim=2, keepdim=True)
         flat_descriptor = descriptor.permute(0, 1, 3, 4, 2).reshape(-1, 6)
         for head, layer in enumerate(self.edge_kan):
-            residual = layer(flat_descriptor).reshape(features.shape[0], len(DIRECTIONS), 1, *size)
+            residual, base, spline = layer.forward_with_contributions(flat_descriptor)
+            residual = residual.reshape(features.shape[0], len(DIRECTIONS), 1, *size)
+            base = base.reshape(features.shape[0], len(DIRECTIONS), 1, *size)
+            spline = spline.reshape(features.shape[0], len(DIRECTIONS), 1, *size)
             total = prior + self.prior_bias[head] + residual
-            affinity = torch.sigmoid(total) * valid_edge
+            topographic_affinity = torch.sigmoid(total)
+            affinity = topographic_affinity * valid_edge
             latent_difference = neighbour_latent[:, :, head] - latent[:, head].unsqueeze(1)
             pair = torch.stack(
                 (latent_difference.abs().mean(2), (latent[:, head].unsqueeze(1) * neighbour_latent[:, :, head]).mean(2)),
@@ -261,28 +313,59 @@ class HydroEdgeKANS1(nn.Module):
             weighted = (gate * message).sum(1, keepdim=True) / denominator
             confidence_weight = gate.sum(1, keepdim=True) / valid_edge.sum(1, keepdim=True).clamp_min(1.0)
             messages.append(weighted.squeeze(1) * confidence_weight.squeeze(1) * self.gamma[head])
-            affinities.append(affinity)
+            affinities.append(topographic_affinity)
             gates.append(gate)
+            compatibilities.append(compatibility)
+            kan_logits.append(residual)
+            base_outputs.append(base)
+            spline_outputs.append(spline)
         update = self.output(torch.cat(messages, dim=1))
         output = features + update
         coefficient_magnitude, coefficient_smoothness = self.spline_regularization()
         monotonicity, curve_smoothness, monotonicity_diagnostics = self.function_regularization()
         gate_stack = torch.cat(gates, dim=2)
         affinity_stack = torch.cat(affinities, dim=2)
+        compatibility_stack = torch.cat(compatibilities, dim=2)
+        kan_logit_stack = torch.cat(kan_logits, dim=2)
+        base_stack = torch.cat(base_outputs, dim=2)
+        spline_stack = torch.cat(spline_outputs, dim=2)
+        valid_edge_heads = valid_edge.expand_as(affinity_stack)
+        graph_input_rms = features.float().square().mean().sqrt()
+        graph_update_rms = update.float().square().mean().sqrt()
+        spline_rms = spline_stack.float().square().mean().sqrt()
+        base_rms = base_stack.float().square().mean().sqrt()
         diagnostics: dict[str, Any] = {
             "gate_mean": gate_stack.mean(),
+            "final_graph_gate_mean": gate_stack.mean(),
             "gate_std": gate_stack.float().std(unbiased=False),
             "valid_edge_fraction": valid_edge.mean(),
-            "static_topographic_affinity_mean": affinity_stack.sum() / valid_edge.sum().clamp_min(1.0),
+            "topographic_kan_logit_mean": kan_logit_stack.mean(),
+            "topographic_affinity_mean": (
+                (affinity_stack * valid_edge_heads).sum()
+                / valid_edge_heads.sum().clamp_min(1.0)
+            ),
+            # Historical key retained for existing reports; it now has correct
+            # multi-head normalization and refers to true topographic affinity.
+            "static_topographic_affinity_mean": (
+                (affinity_stack * valid_edge_heads).sum()
+                / valid_edge_heads.sum().clamp_min(1.0)
+            ),
             "observation_confidence_mean": observation.mean(),
-            "latent_compatibility_mean": torch.stack([value.mean() for value in gates]).mean(),
+            "observation_amplitude_mean": observation.mean(),
+            "latent_compatibility_mean": compatibility_stack.mean(),
             "kan_coefficient_magnitude": coefficient_magnitude,
             "kan_coefficient_smoothness": coefficient_smoothness,
             "kan_monotonicity": monotonicity,
             "kan_curve_smoothness": curve_smoothness,
             "gamma_mean": self.gamma.mean(),
+            "graph_gamma_mean": self.gamma.mean(),
             "gamma_values": self.gamma,
-            "graph_update_rms_ratio": update.square().mean().sqrt() / features.square().mean().sqrt().clamp_min(1.0e-6),
+            "graph_input_rms": graph_input_rms,
+            "graph_update_rms": graph_update_rms,
+            "graph_update_rms_ratio": graph_update_rms / graph_input_rms.clamp_min(1.0e-6),
+            "spline_output_rms": spline_rms,
+            "base_output_rms": base_rms,
+            "spline_base_rms_ratio": spline_rms / base_rms.clamp_min(1.0e-8),
         }
         diagnostics.update(monotonicity_diagnostics)
         if self.diagnostic_mode:
@@ -291,5 +374,7 @@ class HydroEdgeKANS1(nn.Module):
                 "raw_edge_descriptors": raw.detach(),
                 "static_topographic_affinity": affinity_stack.detach(),
                 "valid_edges": valid_edge.detach(),
+                "topographic_kan_logits": kan_logit_stack.detach(),
+                "latent_compatibility": compatibility_stack.detach(),
             })
         return output, diagnostics

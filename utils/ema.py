@@ -41,6 +41,22 @@ class ModelEMA:
         self.updates = int(state.get("updates", 0))
         self.shadow = OrderedDict((k, v.detach().clone()) for k, v in state["shadow"].items())
 
+    @torch.no_grad()
+    def reset_from_model(self, model: torch.nn.Module) -> None:
+        """Make EMA exactly match already-loaded raw model weights.
+
+        This is required when a legacy checkpoint has no EMA payload: keeping the
+        shadow initialized before checkpoint loading would evaluate unrelated,
+        random parameters as "EMA" weights.
+        """
+
+        unwrapped = model.module if hasattr(model, "module") else model
+        self.shadow = OrderedDict(
+            (name, value.detach().clone())
+            for name, value in unwrapped.state_dict().items()
+        )
+        self.updates = 0
+
     def model_state_dict(self):
         return self.shadow
 
@@ -50,6 +66,27 @@ class ModelEMA:
 
     def swap_in(self, model: torch.nn.Module):
         return _EMASwap(self, model)
+
+
+def restore_ema_after_checkpoint_load(
+    ema: ModelEMA | None,
+    checkpoint: dict,
+    model: torch.nn.Module,
+) -> bool:
+    """Restore saved EMA, or safely initialize it from loaded raw weights.
+
+    Returns ``True`` when an EMA payload was restored and ``False`` for the
+    legacy raw-model fallback.
+    """
+
+    if ema is None:
+        return False
+    state = checkpoint.get("ema")
+    if state is not None:
+        ema.load_state_dict(state)
+        return True
+    ema.reset_from_model(model)
+    return False
 
 
 class _EMASwap:

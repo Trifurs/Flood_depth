@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_v15_1_kan.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_1_simple</run_name>
+  <model>
+    <variant type="str">simple</variant>
+    <context_enabled type="bool">true</context_enabled>
+    <decoder_widths type="list" item_type="int"><item>96</item><item>64</item><item>48</item><item>32</item></decoder_widths>
+    <auxiliary_count type="int">1</auxiliary_count>
+    <auxiliary_stage type="int">0</auxiliary_stage>
+    <s1_qa_channels type="int">2</s1_qa_channels>
+  </model>
+  <dataset>
+    <model_s1_qa_names type="list" item_type="str">
+      <item>event_observation_count</item><item>selected_event_day_offset</item>
+    </model_s1_qa_names>
+    <augmentation>
+      <rotate90_probability type="float">0.0</rotate90_probability>
+    </augmentation>
+  </dataset>
+  <loss>
+    <objective_mode type="str">task_adaptive</objective_mode>
+    <supervised_reduction type="str">pixel_micro</supervised_reduction>
+    <depth_huber_beta_m type="float">0.50</depth_huber_beta_m>
+    <lambda_depth type="float">1.0</lambda_depth>
+    <lambda_log type="float">0.05</lambda_log>
+    <lambda_final type="float">0.0</lambda_final>
+    <support_weighted_supervision type="bool">false</support_weighted_supervision>
+    <lambda_depth_bias type="float">0.0</lambda_depth_bias>
+    <lambda_depth_exceedance type="float">0.0</lambda_depth_exceedance>
+    <depth_underprediction_factor type="float">1.0</depth_underprediction_factor>
+    <lambda_pu type="float">0.0</lambda_pu>
+    <lambda_gradient type="float">0.0</lambda_gradient>
+    <lambda_auxiliary type="float">0.04</lambda_auxiliary>
+    <auxiliary_start_epoch type="int">0</auxiliary_start_epoch>
+    <auxiliary_warmup_epochs type="int">0</auxiliary_warmup_epochs>
+    <lambda_unc type="float">0.005</lambda_unc>
+    <unc_start_epoch type="int">10</unc_start_epoch>
+    <unc_warmup_epochs type="int">3</unc_warmup_epochs>
+    <uncertainty_backprop_to_depth type="bool">false</uncertainty_backprop_to_depth>
+    <lambda_kan type="float">0.000001</lambda_kan>
+    <lambda_wse type="float">0.0</lambda_wse>
+    <lambda_absolute_laplacian type="float">0.0</lambda_absolute_laplacian>
+    <lambda_tail type="float">0.0</lambda_tail>
+    <soft_depth_balance type="bool">true</soft_depth_balance>
+    <soft_depth_balance_alpha type="float">0.5</soft_depth_balance_alpha>
+    <soft_depth_balance_tau type="float">10.0</soft_depth_balance_tau>
+    <schedule_total_epochs type="int">45</schedule_total_epochs>
+  </loss>
+</config>

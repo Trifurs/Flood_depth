@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <!-- Lean-loss screen B: β=0.50 remains selected from screen A; change
+       only the deliberately small log1p-depth weight. -->
+  <include path="subset1000_s1_v15_2_combined.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_2_loss_log010</run_name>
+  <loss>
+    <lambda_log type="float">0.10</lambda_log>
+  </loss>
+</config>

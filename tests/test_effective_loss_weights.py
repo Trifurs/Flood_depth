@@ -17,7 +17,7 @@ def test_zero_scheduled_weights_skip_optional_objectives(monkeypatch) -> None:
     for name in ("event_depth_exceedance_loss", "nnpu_logistic_loss", "laplace_nll_loss",
                  "masked_gradient_consistency_loss", "auxiliary_depth_loss",
                  "reference_gated_wse_gradient_loss", "terrain_order_violation_loss",
-                 "weak_wse_laplacian_loss"):
+                 "weak_physics_pair_loss", "weak_wse_laplacian_loss"):
         monkeypatch.setattr(composite, name, fail)
     label = torch.ones(1, 1, 4, 4)
     batch = {

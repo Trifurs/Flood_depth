@@ -25,17 +25,25 @@ class SARHydroDecoder(nn.Module):
         widths: Sequence[int] = (96, 64, 48, 32),
         auxiliary_count: int = 1,
         auxiliary_stage: int = 0,
+        change_injection_scale: float = 0.05,
     ) -> None:
         super().__init__()
         widths = [int(value) for value in widths]
-        if widths != [96, 64, 48, 32]:
-            raise ValueError("SARHydroDecoder requires widths [96, 64, 48, 32]")
+        supported_widths = ([96, 64, 48, 32], [128, 96, 64, 32])
+        if widths not in supported_widths:
+            raise ValueError(
+                "SARHydroDecoder widths must be one of "
+                f"{supported_widths}, got {widths}"
+            )
         if auxiliary_count not in {0, 1, 2}:
             raise ValueError("auxiliary_count must be 0, 1, or 2")
         if auxiliary_stage not in {0, 1}:
             raise ValueError("auxiliary_stage must be 0 (1/4) or 1 (1/2)")
         self.widths = widths
         self.auxiliary_stage = int(auxiliary_stage)
+        self.change_injection_scale = float(change_injection_scale)
+        if self.change_injection_scale < 0.0:
+            raise ValueError("change_injection_scale must be nonnegative")
         self.bottleneck = ConvNormAct(int(channels[-1]), widths[0], 1, groups=groups)
         skip_indices = (2, 1, 0)
         target_widths = (widths[1], widths[2], widths[3])
@@ -111,12 +119,12 @@ class SARHydroDecoder(nn.Module):
                     auxiliaries.append(F.softplus(self.auxiliary[0](decoded)))
                 elif len(self.auxiliary) == 2 and stage in {0, 1}:
                     auxiliaries.append(F.softplus(self.auxiliary[stage](decoded)))
-        if change_evidence:
+        if change_evidence and self.change_injection_scale != 0.0:
             change = F.interpolate(
                 self.change_projection(change_evidence[0]),
                 decoded.shape[-2:],
                 mode="bilinear",
                 align_corners=False,
             )
-            decoded = decoded + 0.05 * change
+            decoded = decoded + self.change_injection_scale * change
         return self.final(decoded), auxiliaries, gate_maps

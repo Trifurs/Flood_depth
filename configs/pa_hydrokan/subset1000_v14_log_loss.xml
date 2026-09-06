@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_v14_bands_selected.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_hydrov14_log_loss</run_name>
+  <loss><lambda_log type="float">0.15</lambda_log></loss>
+</config>

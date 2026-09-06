@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <include path="subset1000_s1_v15_1_simple.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_1_final</run_name>
+  <seed type="int">20260904</seed>
+  <training>
+    <epochs type="int">100</epochs>
+    <minimum_epochs type="int">35</minimum_epochs>
+    <early_stop_patience type="int">20</early_stop_patience>
+    <best_metric type="str">pixel_micro_mae</best_metric>
+  </training>
+  <loss>
+    <schedule_total_epochs type="int">100</schedule_total_epochs>
+  </loss>
+</config>

@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import rasterio
@@ -16,6 +16,7 @@ from datasets.contract import DatasetContract, MODEL_CONTINUOUS_GROUPS, ensure_w
 from datasets.band_selection import BandSpec
 from datasets.model_input_spec import ModelInputSpec
 from datasets.preprocessing import RobustNormalizer, reliability_spec_for_mode
+from datasets.supervision_masks import s1_output_valid_mask
 
 
 class DatasetIntegrityError(RuntimeError):
@@ -39,6 +40,8 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         verify_fingerprints: bool = True,
         band_spec: BandSpec | None = None,
         input_spec: ModelInputSpec | None = None,
+        minimum_event_band_fraction: float = 1.0,
+        s1_qa_names: Sequence[str] | None = None,
     ) -> None:
         if split not in {"train", "val", "test"}:
             raise ValueError(f"Invalid split: {split}")
@@ -49,7 +52,44 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         self.split = split
         self.transform = transform
         self.input_spec = input_spec or ModelInputSpec.from_mode("s1_s2_terrain")
+        self.minimum_event_band_fraction = float(minimum_event_band_fraction)
+        if not 0.0 <= self.minimum_event_band_fraction <= 1.0:
+            raise ValueError("minimum_event_band_fraction must lie in [0, 1]")
         self.contract.validate_input_groups(self.input_spec.active_groups)
+        available_qa_names = tuple(
+            str(value)
+            for value in self.contract.group("s1_qa")["band_descriptions"]
+        )
+        self._required_reliability_qa_names = (
+            "event_observation_count",
+            "selected_event_day_offset",
+        )
+        if s1_qa_names is None:
+            self.s1_qa_names: tuple[str, ...] | None = None
+            self._s1_qa_read_names = available_qa_names
+        else:
+            selected = tuple(str(value) for value in s1_qa_names)
+            if len(selected) != len(set(selected)):
+                raise ValueError("s1_qa_names must be a unique sequence")
+            unsupported = set(selected).difference(
+                {"event_observation_count", "selected_event_day_offset"}
+            )
+            if unsupported:
+                raise ValueError(
+                    "s1_qa_names may contain only modeled spatial QA channels: "
+                    f"{sorted(unsupported)}"
+                )
+            missing_qa = set(selected).difference(available_qa_names)
+            if missing_qa:
+                raise ValueError(
+                    f"Requested S1 QA channels are absent from the contract: {sorted(missing_qa)}"
+                )
+            self.s1_qa_names = selected
+            # Even when no QA tensor is exposed to the model, these two train-safe
+            # source bands are required to construct the single reliability tensor.
+            self._s1_qa_read_names = tuple(
+                dict.fromkeys((*selected, *self._required_reliability_qa_names))
+            )
         self.band_spec = band_spec or BandSpec.resolve(
             self.contract, None, self.input_spec.continuous_groups
         )
@@ -128,6 +168,14 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
                 if group in self.input_spec.continuous_groups and group != "terrain"
                 else None
             )
+            if group == "s1_qa" and self.s1_qa_names is not None:
+                contract_names = tuple(
+                    str(value)
+                    for value in self.contract.group("s1_qa")["band_descriptions"]
+                )
+                selected_indexes = tuple(
+                    contract_names.index(name) for name in self._s1_qa_read_names
+                )
             array, valid, metadata = self._read(row, group, selected_indexes)
             read_band_counts[group] = int(array.shape[0])
             if reference_grid is None:
@@ -183,8 +231,16 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         ).astype(np.float32)
 
         duration = self._duration(row)
-        s1_descriptions = list(self.contract.group("s1_qa")["band_descriptions"])
-        s1_qa = np.zeros_like(arrays["s1_qa"], dtype=np.float32)
+        s1_read_descriptions = list(self._s1_qa_read_names)
+        s1_model_descriptions = list(
+            self.s1_qa_names
+            if self.s1_qa_names is not None
+            else self.contract.group("s1_qa")["band_descriptions"]
+        )
+        s1_qa = np.zeros(
+            (len(s1_model_descriptions), *arrays["s1_qa"].shape[-2:]),
+            dtype=np.float32,
+        )
 
         def qa(group: str, descriptions: list[str], name: str, day: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             position = descriptions.index(name)
@@ -201,12 +257,22 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
             normalized = self.normalizer.qa_feature(group, name, transformed, valid)
             return normalized, raw_normalized, missing.astype(np.float32)
 
-        s1_obs, _, _ = qa("s1_qa", s1_descriptions, "event_observation_count")
+        if (
+            "event_observation_count" not in s1_read_descriptions
+            or "selected_event_day_offset" not in s1_read_descriptions
+        ):
+            raise DatasetIntegrityError(
+                "S1 depth inputs require event_observation_count and "
+                "selected_event_day_offset QA channels"
+            )
+        s1_obs, _, _ = qa("s1_qa", s1_read_descriptions, "event_observation_count")
         s1_day, s1_day_raw, s1_missing = qa(
-            "s1_qa", s1_descriptions, "selected_event_day_offset", day=True
+            "s1_qa", s1_read_descriptions, "selected_event_day_offset", day=True
         )
-        s1_qa[s1_descriptions.index("event_observation_count")] = s1_obs
-        s1_qa[s1_descriptions.index("selected_event_day_offset")] = s1_day
+        if "event_observation_count" in s1_model_descriptions:
+            s1_qa[s1_model_descriptions.index("event_observation_count")] = s1_obs
+        if "selected_event_day_offset" in s1_model_descriptions:
+            s1_qa[s1_model_descriptions.index("selected_event_day_offset")] = s1_day
 
         # Semantic validity and GeoTIFF/per-band validity must both hold. This avoids
         # treating a tensor-safety zero inserted at raster nodata as a real observation.
@@ -225,13 +291,24 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
         duration_feature = np.full_like(
             s1_valid, np.clip(np.log1p(duration) / np.log(32.0), 0.0, 2.0), dtype=np.float32
         )
-        s1_event_support = s1_valid * (branch_valid_fractions["s1_t2"][0] > 0).astype(np.float32)
+        # The event-band fraction is calculated after BandSpec selection, so it is
+        # a true fraction of the model's selected VV/VH event channels and is
+        # invariant to their ordering.  S1-only output support is intentionally
+        # stricter than semantic availability alone.
+        s1_event_fraction = branch_valid_fractions["s1_t2"]
+        s1_event_support_tensor, output_valid_tensor = s1_output_valid_mask(
+            torch.from_numpy(s1_valid[None]),
+            torch.from_numpy(s1_event_fraction),
+            torch.from_numpy(dem_valid[None]),
+            self.minimum_event_band_fraction,
+        )
+        s1_event_support = s1_event_support_tensor.numpy()[0].astype(np.float32)
         if self.input_spec.is_s1_only:
             s2_valid = None
             reliability = np.stack(
                 [s1_obs, s1_day, s1_valid, dem_valid, duration_feature, s1_missing], axis=0
             ).astype(np.float32)
-            output_valid = dem_valid * s1_event_support
+            output_valid = output_valid_tensor.numpy()[0].astype(np.float32)
         else:
             s2_descriptions = list(self.contract.group("s2_qa")["band_descriptions"])
             s2_qa = np.zeros_like(arrays["s2_qa"], dtype=np.float32)
@@ -300,6 +377,7 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
                 "output_valid": torch.from_numpy(output_valid[None]),
                 "s1_t1_valid_fraction": torch.from_numpy(branch_valid_fractions["s1_t1"]),
                 "s1_t2_valid_fraction": torch.from_numpy(branch_valid_fractions["s1_t2"]),
+                "s1_event_band_fraction": torch.from_numpy(s1_event_fraction),
                 "s1_change_valid_fraction": torch.from_numpy(branch_valid_fractions["s1_change"]),
                 "terrain_valid_fraction": torch.from_numpy(
                     branch_valid_fractions["terrain"]
@@ -328,6 +406,7 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
                 "reliability_names": self.reliability_spec.names,
                 "model_input_spec": self.input_spec.as_dict(),
                 "resolved_model_bands": self.band_spec.as_dict(),
+                "model_s1_qa_names": tuple(s1_model_descriptions),
                 "io_profile": {
                     "opened_files": len(metadata_by_group),
                     "read_bands": int(sum(read_band_counts.values())),
@@ -336,6 +415,7 @@ class FloodDepthDataset(Dataset[dict[str, Any]]):
                 "branch_valid_fractions": {
                     key: value.mean().item() for key, value in branch_valid_fractions.items()
                 },
+                "minimum_event_band_fraction": self.minimum_event_band_fraction,
             },
         })
         sample["validity"]["s1_available"] = torch.from_numpy(s1_valid[None])

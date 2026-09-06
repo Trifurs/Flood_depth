@@ -21,7 +21,12 @@ from datasets.band_selection import resolve_band_spec
 from datasets.contract import DatasetContract
 from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
 from losses.composite_loss import CompositeFloodDepthLoss
-from tools.evaluate import dataset_fingerprint, embed_source_fingerprints, evaluate_loader
+from tools.evaluate import (
+    dataset_fingerprint,
+    embed_source_fingerprints,
+    evaluate_loader,
+    frozen_depth_balance_for_config,
+)
 from utils.checkpoint import load_checkpoint
 from utils.config import load_config
 from utils.logging import setup_logging, write_rows
@@ -41,6 +46,10 @@ def locate_sample(config: dict, requested: str) -> tuple[FloodDepthDataset, int]
             config["dataset"]["contract"], config["dataset"]["train_stats"], split,
             band_spec=band_spec,
             input_spec=input_spec,
+            minimum_event_band_fraction=float(
+                config["dataset"].get("minimum_event_band_fraction", 1.0)
+            ),
+            s1_qa_names=config["dataset"].get("model_s1_qa_names"),
         )
         for index, row in enumerate(dataset.rows):
             if row["sample_id"] == requested or row["sample_id"] == requested_stem or Path(
@@ -90,7 +99,12 @@ def main() -> int:
     prior_cfg = config["dataset"]["positive_prior"]
     prior = normalizer.positive_prior if prior_cfg["mode"] == "auto" else float(prior_cfg["value"])
     criterion = CompositeFloodDepthLoss(
-        config["loss"], prior, depth_bins, normalizer.train_depth_bins
+        config["loss"],
+        prior,
+        depth_bins,
+        normalizer.train_depth_bins,
+        normalizer.train_depth_bin_counts,
+        frozen_depth_balance_for_config(config),
     )
     sample_id = dataset.rows[index]["sample_id"]
     output = args.output or Path("runs/infer") / (

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <!-- Conditional tail screen B: identical to screen A except α=0.15. -->
+  <include path="subset1000_s1_v15_2_combined.xml" />
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_2_tail_alpha015</run_name>
+  <loss>
+    <tail_underprediction_alpha type="float">0.15</tail_underprediction_alpha>
+  </loss>
+</config>

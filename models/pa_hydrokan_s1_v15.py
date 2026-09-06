@@ -22,6 +22,7 @@ from models.heads import GlobalEventDepthScale
 from models.s1_hydrology_backbone_v15 import (
     HydrologyContextV15,
     SARHydrologyEncoderV15,
+    SARReliabilityConditioner,
     S1HydrologyFusionV15,
 )
 from models.sar_hydro_decoder import SARHydroDecoder
@@ -64,6 +65,7 @@ class S1ZeroInflatedDepthHeadsV15(nn.Module):
         support_initial_probability: float = 0.10,
         depth_initialization_bias: float = -2.5,
         uncertainty_backbone_gradient: bool = False,
+        uncertainty_initial_scale_m: float | None = None,
     ) -> None:
         super().__init__()
         if output_semantics not in {"conditional_positive_v2", "probability_weighted_v1"}:
@@ -85,6 +87,16 @@ class S1ZeroInflatedDepthHeadsV15(nn.Module):
         depth_final = self.depth_head.trunk[-1]
         assert isinstance(depth_final, nn.Conv2d)
         nn.init.constant_(depth_final.bias, float(depth_initialization_bias))
+        if uncertainty_initial_scale_m is not None:
+            scale = float(uncertainty_initial_scale_m)
+            if not self.epsilon < scale < self.maximum + self.epsilon:
+                raise ValueError(
+                    "uncertainty_initial_scale_m must lie between epsilon and maximum"
+                )
+            uncertainty_final = self.uncertainty_head.trunk[-1]
+            assert isinstance(uncertainty_final, nn.Conv2d)
+            ratio = (scale - self.epsilon) / self.maximum
+            nn.init.constant_(uncertainty_final.bias, _logit(ratio))
         if self.support_head is not None:
             support_final = self.support_head.trunk[-1]
             assert isinstance(support_final, nn.Conv2d)
@@ -148,11 +160,34 @@ class PAHydroKANS1V15(nn.Module):
         dropout = float(model_config.get("dropout", 0.10))
         groups = int(model_config.get("group_norm_groups", 8))
         block_kind = str(model_config.get("residual_block", "efficient"))
+        self.p0_corrections_enabled = bool(
+            model_config.get("p0_corrections_enabled", False)
+        )
         reliability_channels = len(self.reliability_spec.names)
+        qa_channels = int(model_config.get("s1_qa_channels", 5))
+        self.deduplicated_sar_reliability = bool(
+            model_config.get("deduplicated_sar_reliability", False)
+        )
+        if self.deduplicated_sar_reliability and qa_channels != 0:
+            raise ValueError(
+                "deduplicated_sar_reliability requires model.s1_qa_channels=0; "
+                "observation count/day must enter through SARReliabilityConditioner only"
+            )
+        self.reliability_conditioner = (
+            SARReliabilityConditioner(reliability_channels, channels, groups=groups)
+            if self.deduplicated_sar_reliability
+            else None
+        )
         self.sar_encoder = SARHydrologyEncoderV15(
             band_spec.channels("s1_t1"), band_spec.channels("s1_change"),
-            int(model_config.get("s1_qa_channels", 5)), reliability_channels,
-            channels, dropout, groups, block_kind, band_spec.channels("s1_conditioning"),
+            qa_channels, reliability_channels,
+            channels,
+            dropout,
+            groups,
+            block_kind,
+            band_spec.channels("s1_conditioning"),
+            self.p0_corrections_enabled,
+            self.deduplicated_sar_reliability,
         )
         self.terrain = TerrainFeaturePyramidV14(
             band_spec.channels("terrain"), channels, dropout, groups,
@@ -163,8 +198,15 @@ class PAHydroKANS1V15(nn.Module):
         self.fusion = S1HydrologyFusionV15(
             channels, reliability_channels, dropout, groups, block_kind,
             float(model_config.get("terrain_mix_init", 0.30)),
+            float(model_config.get("terrain_alpha_max", 1.0)),
+            self.p0_corrections_enabled,
+            self.deduplicated_sar_reliability,
         )
-        self.context = HydrologyContextV15(channels[-1], groups, dropout=0.05)
+        self.context = (
+            HydrologyContextV15(channels[-1], groups, dropout=0.05)
+            if bool(model_config.get("context_enabled", True))
+            else nn.Identity()
+        )
         self.event_depth_scale = (
             GlobalEventDepthScale(
                 channels[-1],
@@ -175,18 +217,38 @@ class PAHydroKANS1V15(nn.Module):
             else None
         )
         self.graph_enabled = bool(model_config.get("graph_enabled", True))
+        self.actual_graph_feature_stride = 8
+        self.graph_feature_stride = int(
+            model_config.get("graph_feature_stride", self.actual_graph_feature_stride)
+        )
+        if self.p0_corrections_enabled and self.graph_feature_stride != self.actual_graph_feature_stride:
+            raise ValueError(
+                "PA-HydroKAN-S1-v15 places HydroEdgeKAN on the 1/8 bottleneck; "
+                f"graph_feature_stride must be 8, got {self.graph_feature_stride}"
+            )
+        self.graph_descriptor_stride = (
+            self.graph_feature_stride
+            if self.p0_corrections_enabled
+            else int(model_config.get("graph_scale", 4))
+        )
+        self._last_graph_feature_shape: tuple[int, int] | None = None
         self.graph = HydroEdgeKANS1(
             channels[-1], heads=int(model_config.get("graph_heads", 2)),
             grid_size=int(model_config.get("kan_grid_size", 4)),
             spline_order=int(model_config.get("kan_spline_order", 3)),
-            graph_scale=int(model_config.get("graph_scale", 4)),
+            graph_feature_stride=self.graph_descriptor_stride,
             terrain_pixel_size_m=float(model_config.get("terrain_pixel_size_m", 20.0)),
             feature_centers=model_config.get("graph_feature_centers"),
             feature_scales=model_config.get("graph_feature_scales"),
             gamma_init_effective=float(model_config.get("kan_gamma_init_effective", 0.06)),
             gamma_max=float(model_config.get("kan_gamma_max", 0.35)),
             latent_compatibility_enabled=bool(model_config.get("latent_compatibility_enabled", True)),
-            diagnostic_mode=bool(model_config.get("diagnostic_mode", False)),
+            diagnostics_enabled=bool(
+                model_config.get(
+                    "diagnostics_enabled", model_config.get("diagnostic_mode", False)
+                )
+            ),
+            p0_corrected=self.p0_corrections_enabled,
         )
         widths = model_config.get("decoder_widths", [96, 64, 48, 32])
         self.decoder = SARHydroDecoder(
@@ -204,7 +266,22 @@ class PAHydroKANS1V15(nn.Module):
             float(model_config.get("support_initial_probability", 0.10)),
             float(model_config.get("depth_initialization_bias", -2.5)),
             bool(model_config.get("uncertainty_backbone_gradient", False)),
+            model_config.get("uncertainty_initial_scale_m"),
         )
+
+    def graph_identity(self) -> dict[str, Any]:
+        if self.p0_corrections_enabled:
+            return self.graph.graph_identity(self._last_graph_feature_shape)
+        return {
+            "legacy_configured_graph_scale": self.graph_descriptor_stride,
+            "actual_graph_feature_stride": self.actual_graph_feature_stride,
+            "legacy_node_spacing_m_used": self.graph.graph_pixel_size_m,
+            "graph_feature_shape": (
+                list(self._last_graph_feature_shape)
+                if self._last_graph_feature_shape is not None
+                else None
+            ),
+        }
 
     def forward(self, inputs: Mapping[str, torch.Tensor]) -> dict[str, Any]:
         forbidden = S1_V15_FORBIDDEN_INPUTS.intersection(inputs)
@@ -218,22 +295,39 @@ class PAHydroKANS1V15(nn.Module):
         conditioning = inputs.get("s1_conditioning")
         if self.band_spec.channels("s1_conditioning") and conditioning is None:
             raise KeyError("Missing configured S1 angle conditioning")
+        reliability_features = (
+            self.reliability_conditioner(inputs["reliability"], dict(branch_validity))
+            if self.reliability_conditioner is not None
+            else None
+        )
         sar, sar_diagnostics = self.sar_encoder(
             inputs["s1_t1"], inputs["s1_t2"], inputs["s1_change"], inputs["s1_qa"],
             inputs["reliability"], inputs["s1_valid"], conditioning,
-            dict(branch_validity),
+            dict(branch_validity), reliability_features,
         )
         terrain, physical = self.terrain(
             inputs["terrain"], inputs["terrain_raw"], inputs["dem_valid"]
         )
         fused, fusion_diagnostics = self.fusion(
-            sar, terrain, physical, inputs["reliability"], inputs["s1_event_support"]
+            sar,
+            terrain,
+            physical,
+            reliability_features if reliability_features is not None else inputs["reliability"],
+            inputs["s1_event_support"],
         )
         bottleneck = self.context(fused[-1])
         observation_confidence = sar_diagnostics["quality_gates"][-1]
         if self.graph_enabled:
+            self._last_graph_feature_shape = tuple(int(value) for value in bottleneck.shape[-2:])
+            graph_args: dict[str, Any] = {}
+            if self.p0_corrections_enabled:
+                graph_args["feature_stride"] = self.actual_graph_feature_stride
             bottleneck, graph_diagnostics = self.graph(
-                bottleneck, physical, inputs["s1_event_support"], observation_confidence
+                bottleneck,
+                physical,
+                inputs["s1_event_support"],
+                observation_confidence,
+                **graph_args,
             )
         else:
             zero = bottleneck.sum() * 0.0
@@ -246,6 +340,15 @@ class PAHydroKANS1V15(nn.Module):
                 "kan_coefficient_smoothness": zero,
                 "kan_monotonicity": zero, "kan_curve_smoothness": zero,
                 "gamma_mean": zero, "graph_update_rms_ratio": zero,
+                "topographic_kan_logit_mean": zero,
+                "topographic_affinity_mean": zero,
+                "observation_amplitude_mean": zero,
+                "final_graph_gate_mean": zero,
+                "graph_input_rms": zero,
+                "graph_update_rms": zero,
+                "spline_output_rms": zero,
+                "base_output_rms": zero,
+                "spline_base_rms_ratio": zero,
             }
         decoded, auxiliaries, decoder_gates = self.decoder(
             bottleneck, fused, terrain, physical["dem_valid_fractions"],

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <!-- Validation-only candidate: corrected trainer with the fixed hydro_compact BandSpec. -->
+  <include path="subset150_v13_compact.xml" />
+  <run_name type="str">pa_hydrokan_subset150_hydrov13_1_candidate_corrected_v13</run_name>
+  <training>
+    <epochs type="int">45</epochs>
+    <minimum_epochs type="int">40</minimum_epochs>
+    <early_stop_patience type="int">15</early_stop_patience>
+    <num_workers type="int">4</num_workers>
+    <persistent_workers type="bool">true</persistent_workers>
+  </training>
+  <dataset><augmentation>
+    <feature_dropout_probability type="float">0.05</feature_dropout_probability>
+    <sensor_missing_simulation_probability type="float">0.05</sensor_missing_simulation_probability>
+  </augmentation></dataset>
+</config>

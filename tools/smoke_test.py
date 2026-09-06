@@ -18,7 +18,12 @@ from datasets.flooddepth_dataset import prepare_model_inputs
 from datasets.model_input_spec import ModelInputSpec
 from datasets.preprocessing import resolve_depth_stratification_bins
 from losses.composite_loss import CompositeFloodDepthLoss
-from tools.evaluate import dataset_fingerprint, embed_source_fingerprints, evaluate_loader
+from tools.evaluate import (
+    dataset_fingerprint,
+    embed_source_fingerprints,
+    evaluate_loader,
+    frozen_depth_balance_for_config,
+)
 from tools.train import create_dataloaders
 from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import jsonable_config, load_config
@@ -76,6 +81,8 @@ def run_smoke(
         train_dataset.normalizer.positive_prior,
         depth_bins,
         train_dataset.normalizer.train_depth_bins,
+        train_dataset.normalizer.train_depth_bin_counts,
+        frozen_depth_balance_for_config(config),
     )
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)

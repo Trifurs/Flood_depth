@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <!-- V15.3 starts from the audited S1-only V15.2 training contract. -->
+  <include path="subset1000_s1_v15_2_common.xml" />
+  <runs_root type="path">runs/optimization/hydrokan_s1_v15_3</runs_root>
+  <artifacts_root type="path">artifacts/optimization/hydrokan_s1_v15_3</artifacts_root>
+  <run_name type="str">pa_hydrokan_subset1000_s1_v15_3</run_name>
+  <device type="str">cuda</device>
+  <training>
+    <epochs type="int">45</epochs>
+    <minimum_epochs type="int">30</minimum_epochs>
+    <early_stop_patience type="int">100</early_stop_patience>
+    <best_weights type="str">raw</best_weights>
+  </training>
+  <loss>
+    <schedule_total_epochs type="int">45</schedule_total_epochs>
+  </loss>
+</config>

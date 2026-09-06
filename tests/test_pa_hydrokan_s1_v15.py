@@ -34,6 +34,7 @@ def test_v15_backbone_has_separate_detail_and_reliability_paths() -> None:
         dropout=0.0,
         groups=8,
         conditioning_channels=2,
+        p0_corrected=True,
     )
     inputs = {
         "pre": torch.randn(2, 2, 65, 67),
@@ -61,6 +62,7 @@ def test_v15_detail_path_respects_branch_validity() -> None:
         dropout=0.0,
         groups=8,
         conditioning_channels=0,
+        p0_corrected=True,
     ).eval()
     common = {
         "pre": torch.randn(1, 2, 33, 35),
