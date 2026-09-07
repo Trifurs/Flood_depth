@@ -4,6 +4,8 @@
   <run_name type="str">pa_hydrokan</run_name>
   <model>
     <name type="str">pa_hydrokan</name>
+    <display_name type="str">PA-HydroKAN</display_name>
+    <formal_name type="str">Prior-Aware Hydrologic Kolmogorov-Arnold Network</formal_name>
     <channels type="list" item_type="int"><item>32</item><item>64</item><item>128</item><item>192</item></channels>
     <residual_block type="str">efficient</residual_block>
     <dropout type="float">0.10</dropout>
@@ -13,6 +15,9 @@
     <physics_elevation type="str">z_ground_proxy</physics_elevation>
     <terrain_mix_init type="float">0.05</terrain_mix_init>
     <terrain_alpha_max type="float">1.0</terrain_alpha_max>
+    <reliability_conditioning_enabled type="bool">true</reliability_conditioning_enabled>
+    <terrain_conditioned_fusion_enabled type="bool">true</terrain_conditioned_fusion_enabled>
+    <topographic_affinity_enabled type="bool">true</topographic_affinity_enabled>
     <graph_feature_stride type="int">8</graph_feature_stride>
     <graph_heads type="int">2</graph_heads>
     <kan_grid_size type="int">4</kan_grid_size>

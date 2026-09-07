@@ -1,0 +1,13 @@
+<config>
+  <include path="../pa_hydrokan.xml" />
+  <run_name type="str">pa_hydrokan_abl_no_tae_kan</run_name>
+  <model>
+    <topographic_affinity_enabled type="bool">false</topographic_affinity_enabled>
+  </model>
+  <ablation>
+    <variant_id type="str">no_tae_kan</variant_id>
+    <display_name type="str">PA-HydroKAN w/o TAE-KAN</display_name>
+    <removed_module type="str">Topographic-Affinity Edge-KAN (TAE-KAN)</removed_module>
+    <training_rule type="str">retrain_from_scratch_with_matched_protocol</training_rule>
+  </ablation>
+</config>

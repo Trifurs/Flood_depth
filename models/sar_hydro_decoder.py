@@ -14,7 +14,7 @@ from models.encoders import ConvNormAct
 
 
 class SARHydroDecoder(nn.Module):
-    """Decode four SAR/terrain scales with separate residual skip gates."""
+    """Dual-Gated Decoder (DGD) for SAR and topographic skip features."""
 
     def __init__(
         self,

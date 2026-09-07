@@ -22,7 +22,7 @@ def _pool_fraction(value: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
 
 
 class SARReliabilityConditioner(nn.Module):
-    """Encode S1 acquisition reliability exactly once into a scale pyramid.
+    """Reliability-Conditioning Pyramid (RCP) for acquisition metadata.
 
     The input schema contains observation count, event day, availability,
     duration, and missingness.  Per-branch raster-valid fractions are appended
@@ -101,6 +101,25 @@ class SARReliabilityConditioner(nn.Module):
             result.append(projection(torch.cat((reliability_at_scale, *fractions_at_scale), dim=1)))
         return result
 
+    def zero_features(self, reliability: torch.Tensor) -> list[torch.Tensor]:
+        """Return shape-compatible zero features for the RCP ablation.
+
+        The ablation removes all acquisition-reliability and branch-availability
+        conditioning while retaining the encoder's audited tensor contracts.
+        """
+
+        if reliability.ndim != 4 or reliability.shape[1] != self.reliability_channels:
+            raise ValueError(
+                "reliability must have shape (B, "
+                f"{self.reliability_channels}, H, W)"
+            )
+        return [
+            reliability.new_zeros(
+                (reliability.shape[0], width, *self._size_at_scale(reliability, index))
+            )
+            for index, width in enumerate(self.widths)
+        ]
+
 
 def masked_two_way_change_mixer(
     internal_change: torch.Tensor,
@@ -138,7 +157,7 @@ def masked_two_way_change_mixer(
 
 
 class SARHydrologyEncoder(nn.Module):
-    """Multi-path S1 encoder with reliability-aware change gating."""
+    """Temporal-Change SAR Encoder (TCSE) with reliability-aware gating."""
 
     def __init__(
         self,
@@ -374,7 +393,7 @@ class SARHydrologyEncoder(nn.Module):
 
 
 class HydrologyContext(nn.Module):
-    """Stable multi-dilation context with a nonzero but bounded residual."""
+    """Multi-dilation context aggregator with a bounded residual update."""
 
     def __init__(self, channels: int, groups: int = 8, dropout: float = 0.05) -> None:
         super().__init__()
@@ -402,7 +421,7 @@ class HydrologyContext(nn.Module):
 
 
 class S1HydrologyFusion(nn.Module):
-    """Fuse SAR, terrain and reliability with a hydrologic prior gate."""
+    """Terrain-Conditioned Fusion (TCF) of SAR, topography, and reliability."""
 
     def __init__(
         self,
@@ -459,6 +478,18 @@ class S1HydrologyFusion(nn.Module):
     def terrain_mix(self) -> torch.Tensor:
         return self.terrain_alpha_max * torch.sigmoid(self.raw_terrain_mix)
 
+    def disable_terrain_conditioned_paths(self) -> None:
+        """Freeze paths that are bypassed by the ``w/o TCF`` ablation."""
+
+        for module in (
+            self.terrain_projection,
+            self.hydrology_projection,
+            self.terrain_gate,
+            self.sar_gate,
+        ):
+            module.requires_grad_(False)
+        self.raw_terrain_mix.requires_grad_(False)
+
     def forward(
         self,
         sar: Sequence[torch.Tensor],
@@ -466,6 +497,8 @@ class S1HydrologyFusion(nn.Module):
         physical: Mapping[str, torch.Tensor],
         reliability: Sequence[torch.Tensor],
         sensor_valid: torch.Tensor,
+        *,
+        terrain_conditioned_fusion_enabled: bool = True,
     ) -> tuple[list[torch.Tensor], dict[str, Any]]:
         outputs: list[torch.Tensor] = []
         terrain_gates: list[torch.Tensor] = []
@@ -475,39 +508,48 @@ class S1HydrologyFusion(nn.Module):
         for index, (sar_value, terrain_value) in enumerate(zip(sar, terrain)):
             size = sar_value.shape[-2:]
             sar_main = self.sar_projection[index](sar_value)
-            terrain_main = self.terrain_projection[index](terrain_value)
             reliability_main = reliability[index]
             if reliability_main.shape[-2:] != size:
                 raise ValueError("reliability conditioner scale shape does not match fusion features")
-            dem = F.adaptive_avg_pool2d(physical["dem_valid"], size).to(sar_main.dtype)
-            relief = F.adaptive_avg_pool2d(physical["local_relief"], size)
-            obstacle = F.adaptive_avg_pool2d(physical["obstacle_residual"], size)
-            relative = F.adaptive_avg_pool2d(physical["z_relative"], size)
-            hydro_raw = torch.cat(
-                (torch.tanh(relative / (relief + 1.0)),
-                 torch.tanh(relief / 12.0),
-                 torch.tanh(obstacle / (relief + 1.0))), dim=1
-            ) * dem
-            hydro = self.hydrology_projection[index](hydro_raw)
             sensor_fraction = F.adaptive_avg_pool2d(sensor_valid, size).to(sar_main.dtype)
-            terrain_gate = torch.sigmoid(
-                self.terrain_gate[index](
-                    torch.cat((sar_main, terrain_main, reliability_main, dem, hydro_raw), dim=1)
+            if terrain_conditioned_fusion_enabled:
+                terrain_main = self.terrain_projection[index](terrain_value)
+                dem = F.adaptive_avg_pool2d(physical["dem_valid"], size).to(sar_main.dtype)
+                relief = F.adaptive_avg_pool2d(physical["local_relief"], size)
+                obstacle = F.adaptive_avg_pool2d(physical["obstacle_residual"], size)
+                relative = F.adaptive_avg_pool2d(physical["z_relative"], size)
+                hydro_raw = torch.cat(
+                    (torch.tanh(relative / (relief + 1.0)),
+                     torch.tanh(relief / 12.0),
+                     torch.tanh(obstacle / (relief + 1.0))), dim=1
+                ) * dem
+                hydro = self.hydrology_projection[index](hydro_raw)
+                terrain_gate = torch.sigmoid(
+                    self.terrain_gate[index](
+                        torch.cat((sar_main, terrain_main, reliability_main, dem, hydro_raw), dim=1)
+                    )
+                ) * dem
+                sar_gate = torch.sigmoid(
+                    self.sar_gate[index](
+                        torch.cat((sar_main, reliability_main, sensor_fraction, dem), dim=1)
+                    )
+                ) * sensor_fraction
+                fused = (
+                    # SAR is the identity/main stream.  The learned gate controls
+                    # auxiliary reliability modulation; random initialization must
+                    # never erase half of the only observation source.
+                    sar_main
+                    + 0.10 * sar_gate * reliability_main
+                    + self.terrain_mix[index] * terrain_gate * terrain_main
+                    + 0.15 * reliability_main
+                    + 0.15 * hydro
                 )
-            ) * dem
-            sar_gate = torch.sigmoid(
-                self.sar_gate[index](torch.cat((sar_main, reliability_main, sensor_fraction, dem), dim=1))
-            ) * sensor_fraction
-            fused = (
-                # SAR is the identity/main stream.  The learned gate controls
-                # auxiliary reliability modulation; random initialization must
-                # never erase half of the only observation source.
-                sar_main
-                + 0.10 * sar_gate * reliability_main
-                + self.terrain_mix[index] * terrain_gate * terrain_main
-                + 0.15 * reliability_main
-                + 0.15 * hydro
-            )
+            else:
+                # ``w/o TCF`` retains the SAR stream and RCP but removes every
+                # terrain/proxy-derived additive path from this fusion block.
+                terrain_gate = sensor_fraction.new_zeros(sensor_fraction.shape)
+                sar_gate = sensor_fraction
+                fused = sar_main + 0.10 * sar_gate * reliability_main + 0.15 * reliability_main
             outputs.append(self.refine[index](fused))
             terrain_gates.append(terrain_gate)
             sar_gates.append(sar_gate)
@@ -516,6 +558,11 @@ class S1HydrologyFusion(nn.Module):
             "sar_gates": sar_gates,
             "terrain_gate_mean": torch.stack([value.mean() for value in terrain_gates]).mean(),
             "sar_gate_mean": torch.stack([value.mean() for value in sar_gates]).mean(),
-            "terrain_mix": self.terrain_mix,
+            "terrain_mix": (
+                self.terrain_mix
+                if terrain_conditioned_fusion_enabled
+                else torch.zeros_like(self.terrain_mix)
+            ),
+            "terrain_conditioned_fusion_enabled": bool(terrain_conditioned_fusion_enabled),
         }
         return outputs, diagnostics

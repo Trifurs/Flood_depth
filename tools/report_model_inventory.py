@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from utils.config import load_config
 from utils.logging import write_rows
 from utils.misc import atomic_write_json, atomic_write_text
-from utils.registry import build_model
+from utils.registry import MODEL_DISPLAY_NAME, build_model
 from compare.common.comparison_factory import BUILDERS, build_comparison_model
 
 
@@ -69,11 +69,11 @@ def inventory(depth_config: Path, comparison_configs: tuple[Path, ...]) -> list[
     depth_total, depth_trainable = _count(build_model(depth))
     return [
         {
-            "method": "PA-HydroKAN", "identifier": "pa_hydrokan", "learnable": "yes",
+            "method": MODEL_DISPLAY_NAME, "identifier": "pa_hydrokan", "learnable": "yes",
             "total_parameters": depth_total, "trainable_parameters": depth_trainable,
             "inputs": "S1 T1/T2/change + incidence + DSM/slope + QA reliability",
             "flood_support": "not an input; conditional positive-depth regression",
-            "key_configuration": "channels=32/64/128/192; Edge-KAN; graph stride=8",
+            "key_configuration": "channels=32/64/128/192; TAE-KAN; graph stride=8",
             "source_record": "docs/MODEL.md",
         },
         {

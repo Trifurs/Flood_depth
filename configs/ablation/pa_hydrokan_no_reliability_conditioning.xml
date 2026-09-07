@@ -1,0 +1,13 @@
+<config>
+  <include path="../pa_hydrokan.xml" />
+  <run_name type="str">pa_hydrokan_abl_no_rcp</run_name>
+  <model>
+    <reliability_conditioning_enabled type="bool">false</reliability_conditioning_enabled>
+  </model>
+  <ablation>
+    <variant_id type="str">no_rcp</variant_id>
+    <display_name type="str">PA-HydroKAN w/o RCP</display_name>
+    <removed_module type="str">Reliability-Conditioning Pyramid (RCP)</removed_module>
+    <training_rule type="str">retrain_from_scratch_with_matched_protocol</training_rule>
+  </ablation>
+</config>

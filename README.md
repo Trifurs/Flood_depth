@@ -7,7 +7,7 @@ separately documented comparison models use `valid_depth_mask` directly as the
 user-required flood-range oracle; no model predicts flood extent.
 
 The production model is **PA-HydroKAN** (`pa_hydrokan`): a SAR-first,
-terrain-aware depth estimator with an Edge-KAN terrain-connectivity prior.
+terrain-aware depth estimator with a TAE-KAN terrain-connectivity prior.
 `configs/pa_hydrokan.xml` is its sole model configuration.
 
 The comparison workflow is deliberately separated from the production depth
@@ -18,12 +18,13 @@ range; no flood-range prediction model is included.
 
 - `configs/pa_hydrokan.xml` — PA-HydroKAN training and inference configuration.
 - `configs/base/` — common runtime and dataset configuration fragments.
+- `configs/ablation/` — matched PA-HydroKAN ablation configurations.
 - `configs/compare/traditional/` — one configuration for each traditional
   comparison model.
 - `configs/compare/deep_learning/` — one configuration for each learned
   comparison model.
 - `assets/` — audited dataset contract and train-only normalization statistics.
-- `models/` — PA-HydroKAN only: SAR encoder, terrain features, Edge-KAN graph,
+- `models/` — PA-HydroKAN only: SAR encoder, terrain features, TAE-KAN graph,
   decoder, and heads.
 - `compare/common/` — shared comparison blocks, terrain primitives, registries,
   and factories.
@@ -79,3 +80,7 @@ plain U-Net regression, ResNet18 regression, and U-Net++ regression. Each has a
 model-named implementation, XML configuration, training script, and evaluation
 script. Their sources and non-selected candidates are recorded in
 [docs/COMPARISON_SOURCES.md](docs/COMPARISON_SOURCES.md).
+
+PA-HydroKAN's publication-facing name and module terminology are recorded in
+[docs/MODEL_NOMENCLATURE.md](docs/MODEL_NOMENCLATURE.md); the matched ablation
+protocol and configuration set are in [docs/ABLATION_PROTOCOL.md](docs/ABLATION_PROTOCOL.md).

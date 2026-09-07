@@ -1,4 +1,7 @@
-"""Production PA-HydroKAN SAR-and-terrain model."""
+"""Production PA-HydroKAN SAR-and-terrain model.
+
+Paper name: Prior-Aware Hydrologic Kolmogorov-Arnold Network.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +25,10 @@ from models.s1_hydrology_backbone import (
 from models.sar_hydro_decoder import SARHydroDecoder
 from models.task_head import TaskHead
 from models.terrain_features import TerrainFeaturePyramid
+
+
+PAPER_MODEL_NAME = "PA-HydroKAN"
+PAPER_MODEL_EXPANSION = "Prior-Aware Hydrologic Kolmogorov-Arnold Network"
 
 
 REQUIRED_INPUTS = {
@@ -51,7 +58,7 @@ def _logit(value: float) -> float:
 
 
 class PAHydroKANHeads(nn.Module):
-    """Predict conditional positive depth and a detached uncertainty scale."""
+    """Conditional-Depth Head (CDH) with a detached uncertainty branch."""
 
     def __init__(
         self,
@@ -101,7 +108,13 @@ class PAHydroKANHeads(nn.Module):
 
 
 class PAHydroKAN(nn.Module):
-    """PA-HydroKAN: SAR-first, terrain-aware conditional-depth estimator."""
+    """PA-HydroKAN: a prior-aware SAR/topography depth estimator.
+
+    The named paper modules are RCP (reliability conditioning), TCSE
+    (temporal-change SAR encoder), TPP (topographic-prior pyramid), TCF
+    (terrain-conditioned fusion), TAE-KAN (topographic-affinity Edge-KAN),
+    DGD (dual-gated decoder), and CDH (conditional-depth head).
+    """
 
     def __init__(
         self,
@@ -116,6 +129,18 @@ class PAHydroKAN(nn.Module):
         self.input_spec = input_spec
         self.reliability_spec = ReliabilitySpec.from_mode(input_spec.mode)
         self.band_spec = band_spec
+        self.reliability_conditioning_enabled = bool(
+            model_config.get("reliability_conditioning_enabled", True)
+        )
+        self.terrain_conditioned_fusion_enabled = bool(
+            model_config.get("terrain_conditioned_fusion_enabled", True)
+        )
+        self.topographic_affinity_enabled = bool(
+            model_config.get("topographic_affinity_enabled", True)
+        )
+        self.latent_compatibility_enabled = bool(
+            model_config.get("latent_compatibility_enabled", True)
+        )
         channels = [int(value) for value in model_config["channels"]]
         if len(channels) != 4 or any(value <= 0 for value in channels):
             raise ValueError("PAHydroKAN requires four positive encoder scales")
@@ -169,7 +194,7 @@ class PAHydroKAN(nn.Module):
             feature_scales=model_config["graph_feature_scales"],
             gamma_init_effective=float(model_config["kan_gamma_init_effective"]),
             gamma_max=float(model_config["kan_gamma_max"]),
-            latent_compatibility_enabled=bool(model_config["latent_compatibility_enabled"]),
+            latent_compatibility_enabled=self.latent_compatibility_enabled,
             diagnostics_enabled=bool(model_config.get("diagnostics_enabled", False)),
         )
         widths = [int(value) for value in model_config["decoder_widths"]]
@@ -190,9 +215,30 @@ class PAHydroKAN(nn.Module):
             depth_initialization_bias=float(model_config["depth_initialization_bias"]),
             uncertainty_initial_scale_m=float(model_config["uncertainty_initial_scale_m"]),
         )
+        # Disabled components retain their state-dictionary entries so an
+        # ablation can be evaluated against the same initialized/full checkpoint,
+        # but they are excluded from optimization and DDP gradient accounting.
+        if not self.reliability_conditioning_enabled:
+            self.reliability_conditioner.requires_grad_(False)
+        if not self.terrain_conditioned_fusion_enabled:
+            self.fusion.disable_terrain_conditioned_paths()
+        if not self.topographic_affinity_enabled:
+            self.graph.requires_grad_(False)
         self._last_graph_feature_shape: tuple[int, int] | None = None
 
-    def graph_identity(self) -> dict[str, Any]:
+    def component_flags(self) -> dict[str, bool]:
+        """Return the named-paper component status for logs and ablation reports."""
+
+        return {
+            "reliability_conditioning_enabled": self.reliability_conditioning_enabled,
+            "terrain_conditioned_fusion_enabled": self.terrain_conditioned_fusion_enabled,
+            "topographic_affinity_enabled": self.topographic_affinity_enabled,
+            "latent_compatibility_enabled": self.latent_compatibility_enabled,
+        }
+
+    def graph_identity(self) -> dict[str, Any] | None:
+        if not self.topographic_affinity_enabled:
+            return None
         return self.graph.graph_identity(self._last_graph_feature_shape)
 
     def forward(self, inputs: Mapping[str, torch.Tensor]) -> dict[str, Any]:
@@ -206,8 +252,10 @@ class PAHydroKAN(nn.Module):
         conditioning = inputs.get("s1_conditioning")
         if self.band_spec.channels("s1_conditioning") and conditioning is None:
             raise KeyError("Missing configured S1 angle conditioning")
-        reliability_features = self.reliability_conditioner(
-            inputs["reliability"], branch_validity
+        reliability_features = (
+            self.reliability_conditioner(inputs["reliability"], branch_validity)
+            if self.reliability_conditioning_enabled
+            else self.reliability_conditioner.zero_features(inputs["reliability"])
         )
         sar, sar_diagnostics = self.sar_encoder(
             inputs["s1_t1"],
@@ -227,16 +275,23 @@ class PAHydroKAN(nn.Module):
             physical,
             reliability_features,
             inputs["s1_event_support"],
+            terrain_conditioned_fusion_enabled=self.terrain_conditioned_fusion_enabled,
         )
         bottleneck = self.context(fused[-1])
-        self._last_graph_feature_shape = tuple(int(value) for value in bottleneck.shape[-2:])
-        bottleneck, graph_diagnostics = self.graph(
-            bottleneck,
-            physical,
-            inputs["s1_event_support"],
-            sar_diagnostics["quality_gates"][-1],
-            feature_stride=8,
-        )
+        if self.topographic_affinity_enabled:
+            self._last_graph_feature_shape = tuple(
+                int(value) for value in bottleneck.shape[-2:]
+            )
+            bottleneck, graph_diagnostics = self.graph(
+                bottleneck,
+                physical,
+                inputs["s1_event_support"],
+                sar_diagnostics["quality_gates"][-1],
+                feature_stride=8,
+            )
+        else:
+            self._last_graph_feature_shape = None
+            graph_diagnostics = {}
         decoded, auxiliaries, decoder_gates = self.decoder(
             bottleneck,
             fused,
@@ -254,6 +309,7 @@ class PAHydroKAN(nn.Module):
                 "sar_diagnostics": sar_diagnostics,
                 "graph_diagnostics": graph_diagnostics,
                 "physical_features": physical,
+                "component_flags": self.component_flags(),
             }
         )
         return outputs
@@ -271,4 +327,3 @@ def build_pa_hydrokan(config: Mapping[str, Any]) -> PAHydroKAN:
     band_spec = resolve_band_spec(config, contract)
     raw_names = tuple(str(value) for value in contract.group("terrain")["band_descriptions"])
     return PAHydroKAN(config["model"], band_spec, raw_names, input_spec)
-

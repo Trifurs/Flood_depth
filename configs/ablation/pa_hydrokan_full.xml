@@ -1,0 +1,10 @@
+<config>
+  <include path="../pa_hydrokan.xml" />
+  <run_name type="str">pa_hydrokan_abl_full</run_name>
+  <ablation>
+    <variant_id type="str">full</variant_id>
+    <display_name type="str">PA-HydroKAN</display_name>
+    <removed_module type="str">none</removed_module>
+    <training_rule type="str">retrain_from_scratch_with_matched_protocol</training_rule>
+  </ablation>
+</config>

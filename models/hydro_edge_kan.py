@@ -39,7 +39,7 @@ def _inverse_softplus(value: float) -> float:
 
 
 class HydroEdgeKAN(nn.Module):
-    """Eight-neighbour S1-only graph with static terrain affinity."""
+    """Topographic-Affinity Edge-KAN (TAE-KAN) on an eight-neighbour graph."""
 
     def __init__(
         self,
@@ -116,6 +116,11 @@ class HydroEdgeKAN(nn.Module):
         for projection in self.latent_compatibility:
             nn.init.zeros_(projection.weight)
             nn.init.zeros_(projection.bias)
+        if not self.latent_compatibility_enabled:
+            # The LCA is intentionally absent in this variant.  Keeping its
+            # tensors in the state dictionary preserves checkpoint schema while
+            # excluding them from optimization and distributed gradient checks.
+            self.latent_compatibility.requires_grad_(False)
         self.prior_raw_scales = nn.Parameter(
             torch.tensor([_inverse_softplus(value) for value in (0.5, 0.25, 0.10, 0.15, 0.10, 0.02)])
         )

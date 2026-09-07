@@ -16,6 +16,8 @@ def resolved_graph_identity(config: Mapping[str, Any]) -> dict[str, Any] | None:
     dataset = config.get("dataset", {})
     if not isinstance(model, Mapping) or str(model.get("name")) != MODEL_NAME:
         return None
+    if not bool(model.get("topographic_affinity_enabled", True)):
+        return None
     stride = int(model.get("graph_feature_stride", 8))
     if stride != 8:
         raise ValueError("model.graph_feature_stride must be 8")

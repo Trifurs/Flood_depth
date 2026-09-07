@@ -137,7 +137,7 @@ def path_barrier_proxy(
 
 
 class TerrainFeaturePyramid(nn.Module):
-    """Resolution-aware terrain pyramid with name-resolved DSM/slope channels."""
+    """Topographic-Prior Pyramid (TPP) with name-resolved DSM/slope channels."""
 
     def __init__(
         self, input_channels: int, channels: list[int], dropout: float, groups: int,
