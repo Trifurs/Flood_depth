@@ -1,35 +1,47 @@
 from __future__ import annotations
 
-import random
-
-import numpy as np
 import torch
 
-from utils.checkpoint import capture_rng_state, restore_rng_state
+from tools.evaluate import dataset_fingerprint
+from utils.checkpoint import load_checkpoint, save_checkpoint
+from utils.config import jsonable_config
+from utils.registry import build_model
 
 
-def test_restore_rng_accepts_list_like_cpu_state() -> None:
-    random.seed(17)
-    np.random.seed(17)
-    torch.manual_seed(17)
-    state = capture_rng_state()
-    expected = (
-        random.random(),
-        float(np.random.random()),
-        torch.rand(4),
+def test_checkpoint_round_trip_is_fingerprint_strict(production_config, tmp_path) -> None:
+    model = build_model(production_config)
+    fingerprint = dataset_fingerprint(production_config)
+    path = tmp_path / "model.pth"
+    save_checkpoint(
+        path,
+        model,
+        optimizer=None,
+        scheduler=None,
+        scaler=None,
+        epoch=0,
+        best_metric=1.0,
+        resolved_config=jsonable_config(production_config),
+        dataset_fingerprint=fingerprint,
+        training_context={"epochs": 1},
     )
-    random.random()
-    np.random.random()
-    torch.rand(8)
-    portable_state = dict(state)
-    portable_state["torch_cpu"] = state["torch_cpu"].tolist()
-    portable_state["torch_cuda"] = None
-    restore_rng_state(portable_state)
-    actual = (
-        random.random(),
-        float(np.random.random()),
-        torch.rand(4),
+    restored = build_model(production_config)
+    checkpoint = load_checkpoint(
+        path,
+        restored,
+        expected_fingerprint=fingerprint,
+        expected_training_identity_sha256=checkpoint_identity(
+            production_config, fingerprint
+        ),
     )
-    assert actual[0] == expected[0]
-    assert actual[1] == expected[1]
-    torch.testing.assert_close(actual[2], expected[2], rtol=0, atol=0)
+    assert checkpoint["output_semantics"] == "conditional_positive"
+    source = next(model.parameters()).detach()
+    target = next(restored.parameters()).detach()
+    assert torch.equal(source, target)
+
+
+def checkpoint_identity(config, fingerprint):
+    from utils.checkpoint import training_identity_sha256
+
+    return training_identity_sha256(
+        jsonable_config(config), fingerprint, training_context={"epochs": 1}
+    )

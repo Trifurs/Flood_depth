@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pytest
 
-from utils.config import load_config
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+@pytest.fixture
+def production_config():
+    from tools.evaluate import embed_source_fingerprints
+    from utils.config import load_config
 
-
-@pytest.fixture(scope="session")
-def config_path() -> Path:
-    return PROJECT_ROOT / "configs/pa_hydrokan/subset1000_s1_v15_gpu_precision.xml"
-
-
-@pytest.fixture(scope="session")
-def config(config_path: Path) -> dict:
-    return load_config(config_path)
+    return embed_source_fingerprints(load_config(ROOT / "configs" / "config.xml"))

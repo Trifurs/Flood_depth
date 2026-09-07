@@ -1,11 +1,5 @@
-"""Registered models for the optical-free Sentinel-1 model family."""
+"""Production flood-depth model."""
 
-from .pa_hydrokan_s1_v14 import PAHydroKANS1V14, build_pa_hydrokan_s1_v14
-from .pa_hydrokan_s1_v15 import PAHydroKANS1V15, build_pa_hydrokan_s1_v15
+from .flood_depth_model import FloodDepthModel, build_flood_depth_model
 
-__all__ = [
-    "PAHydroKANS1V14",
-    "build_pa_hydrokan_s1_v14",
-    "PAHydroKANS1V15",
-    "build_pa_hydrokan_s1_v15",
-]
+__all__ = ["FloodDepthModel", "build_flood_depth_model"]

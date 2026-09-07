@@ -1,4 +1,4 @@
-"""Train-only canonical depth calibration without opening Sentinel-2 rasters."""
+"""Train-only canonical depth calibration for SAR-and-terrain inputs."""
 
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ class TrainDepthScan:
     depths_m: np.ndarray
     sample_count: int
     canonical_positive_pixels: int
-    s2_files_opened: int = 0
 
     def summary(self) -> dict[str, Any]:
         if self.depths_m.size == 0:
@@ -40,7 +39,6 @@ class TrainDepthScan:
             "depth_max_m": float(values.max()),
             "depth_mean_m": float(values.mean()),
             "depth_median_m": float(np.median(values)),
-            "s2_files_opened": self.s2_files_opened,
         }
 
 
@@ -89,8 +87,8 @@ def collect_canonical_train_depths(
 ) -> TrainDepthScan:
     """Collect train targets under the same S1-only canonical output mask.
 
-    This intentionally opens only ``label``, ``masks``, selected S1-event bands,
-    and terrain.  It never references an S2 group or manifest path.
+    This intentionally opens only labels, masks, selected event-period SAR bands,
+    and terrain.
     """
 
     if not 0.0 <= float(minimum_event_band_fraction) <= 1.0:

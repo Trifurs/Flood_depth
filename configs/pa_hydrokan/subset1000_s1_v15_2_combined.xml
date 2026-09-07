@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<config>
-  <!-- Experiment 6 is the selected Graph-A + original KAN + Physics-A
-       composition.  It is intentionally configuration-identical to the
-       winning Physics-A run; retraining it would duplicate the same
-       deterministic 45-epoch experiment without testing a new variable. -->
-  <include path="subset1000_s1_v15_2_physics_order.xml" />
-  <run_name type="str">pa_hydrokan_subset1000_s1_v15_2_combined</run_name>
-</config>

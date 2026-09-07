@@ -4,14 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import csv
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import logging
 import math
 import os
 from pathlib import Path
-import platform
 import sys
 import time
 from typing import Any, Mapping
@@ -21,7 +19,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
-import rasterio
 import torch
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, default_collate
@@ -76,34 +73,6 @@ from utils.optim import build_optimizer, build_scheduler
 LOGGER = logging.getLogger("train")
 
 
-def infer_legacy_patience(
-    metrics_path: Path,
-    checkpoint_epoch: int,
-    monitor: str,
-    weights: str,
-    min_delta: float,
-) -> int:
-    """Recover an early-stop counter from legacy epoch CSV when possible."""
-
-    if not metrics_path.exists():
-        return 0
-    metric_column = (
-        f"val_ema_{monitor}" if weights == "ema" else f"val_{monitor}"
-    )
-    best = float("inf")
-    last_improvement = -1
-    with metrics_path.open("r", encoding="utf-8", newline="") as handle:
-        for row in csv.DictReader(handle):
-            epoch = int(row["epoch"])
-            if epoch > checkpoint_epoch or not row.get(metric_column):
-                continue
-            value = float(row[metric_column])
-            if value < best - min_delta:
-                best = value
-                last_improvement = epoch
-    return max(0, checkpoint_epoch - last_improvement) if last_improvement >= 0 else 0
-
-
 def accumulation_window_sizes(total_batches: int, accumulation_steps: int) -> list[int]:
     if total_batches < 0 or accumulation_steps <= 0:
         raise ValueError("Invalid accumulation dimensions")
@@ -133,7 +102,7 @@ def _diagnostic_mean(value: Any, default: float = 0.0) -> float:
 def _training_diagnostic_values(
     outputs: Mapping[str, Any], batch: Mapping[str, Any]
 ) -> dict[str, float]:
-    """Compact V15.1 observability values for CSV and epoch/TensorBoard logs."""
+    """Compact production observability values for CSV and TensorBoard logs."""
 
     graph = outputs.get("graph_diagnostics", {})
     sar = outputs.get("sar_diagnostics", {})
@@ -147,29 +116,21 @@ def _training_diagnostic_values(
         uncertainty_p99 = float(torch.quantile(selected_scale, 0.99).cpu())
     else:
         uncertainty_p50 = uncertainty_p90 = uncertainty_p99 = 0.0
-    terrain_alpha = fusion.get("terrain_alpha", fusion.get("terrain_mix"))
+    terrain_mix = fusion.get("terrain_mix")
     return {
         "internal_change_weight_mean": _diagnostic_mean(sar.get("internal_weight_mean")),
         "external_change_weight_mean": _diagnostic_mean(sar.get("external_weight_mean")),
         "pair_valid_fraction_mean": _diagnostic_mean(sar.get("pair_valid_fraction_mean")),
         "pre_context_gate_mean": _diagnostic_mean(sar.get("pre_context_gate_mean")),
         "change_gate_mean": _diagnostic_mean(sar.get("change_gate_mean")),
-        "angle_gamma_rms": _diagnostic_mean(sar.get("angle_gamma_rms")),
-        "angle_beta_rms": _diagnostic_mean(sar.get("angle_beta_rms")),
-        "angle_conditioner_output_input_rms_ratio": _diagnostic_mean(
-            sar.get("angle_conditioner_output_input_rms_ratio")
+        "angle_film_amplitude": _diagnostic_mean(sar.get("angle_film_amplitude")),
+        "quality_mean": _diagnostic_mean(sar.get("quality_mean")),
+        "detail_gate_mean": _diagnostic_mean(sar.get("detail_gate_mean")),
+        "reliability_residual_mean": _diagnostic_mean(
+            sar.get("reliability_residual_mean")
         ),
-        "absolute_sar_shortcut_scale_mean": _diagnostic_mean(
-            sar.get("absolute_sar_shortcut_scale")
-        ),
-        "absolute_sar_shortcut_residual_input_rms_ratio": _diagnostic_mean(
-            sar.get("absolute_sar_shortcut_residual_input_rms_ratio")
-        ),
-        "terrain_alpha_mean": _diagnostic_mean(terrain_alpha),
+        "terrain_mix_mean": _diagnostic_mean(terrain_mix),
         "terrain_gate_mean": _diagnostic_mean(fusion.get("terrain_gate_mean")),
-        "terrain_residual_input_rms_ratio": _diagnostic_mean(
-            fusion.get("terrain_residual_input_rms_ratio")
-        ),
         "topographic_kan_logit_mean": _diagnostic_mean(
             graph.get("topographic_kan_logit_mean")
         ),
@@ -187,12 +148,6 @@ def _training_diagnostic_values(
         ),
         "graph_update_input_rms_ratio": _diagnostic_mean(
             graph.get("graph_update_rms_ratio")
-        ),
-        "graph_bottleneck_scale": _diagnostic_mean(
-            graph.get("graph_bottleneck_scale")
-        ),
-        "graph_bottleneck_residual_input_rms_ratio": _diagnostic_mean(
-            graph.get("graph_bottleneck_residual_input_rms_ratio")
         ),
         "spline_base_rms_ratio": _diagnostic_mean(
             graph.get("spline_base_rms_ratio")
@@ -329,12 +284,13 @@ def create_dataloaders(
     augmentation = config["dataset"]["augmentation"]
     input_spec = ModelInputSpec.from_config(config)
     transform = SynchronousAugment(
-        float(augmentation["horizontal_flip_probability"]),
-        float(augmentation["vertical_flip_probability"]),
-        float(augmentation["rotate90_probability"]),
-        augmentation.get("modality_dropout_probability"),
-        augmentation.get("feature_dropout_probability"),
-        augmentation.get("sensor_missing_simulation_probability"),
+        horizontal_flip_probability=float(augmentation["horizontal_flip_probability"]),
+        vertical_flip_probability=float(augmentation["vertical_flip_probability"]),
+        rotate90_probability=float(augmentation["rotate90_probability"]),
+        feature_dropout_probability=augmentation.get("feature_dropout_probability"),
+        sensor_missing_simulation_probability=augmentation.get(
+            "sensor_missing_simulation_probability"
+        ),
         input_mode=input_spec.mode,
     )
     contract = DatasetContract.load(config["dataset"]["contract"])
@@ -478,7 +434,7 @@ def prepare_train_only_calibration(
     loss = config["loss"]
     model = config["model"]
     task_adaptive_balance = (
-        str(loss.get("objective_mode", "legacy")) == "task_adaptive"
+        str(loss.get("objective_mode", "task_adaptive")) == "task_adaptive"
         and bool(loss.get("soft_depth_balance", False))
     )
     depth_initialization_mode = str(model.get("depth_initialization_mode", "configured"))
@@ -799,31 +755,8 @@ def train_one_epoch(
         ):
             now = time.perf_counter()
             graph = outputs.get("graph_diagnostics", {})
-            modality_weights = outputs.get("modality_weights", [])
-            modality_mean = torch.stack([value.mean() for value in modality_weights]).mean() if modality_weights else loss.new_tensor(float("nan"))
-            s1_weight_mean = torch.stack([value[:, 0:1].mean() for value in modality_weights]).mean() if modality_weights else loss.new_tensor(float("nan"))
-            s2_weight_mean = torch.stack([value[:, 1:2].mean() for value in modality_weights]).mean() if modality_weights else loss.new_tensor(float("nan"))
             uncertainty = outputs["uncertainty_scale"].detach().float()
             elapsed = max(now - interval_start, 1e-9)
-            terrain_gate = outputs.get("terrain_gates", [])
-            terrain_gate_mean = (
-                torch.stack([value.mean() for value in terrain_gate]).mean()
-                if terrain_gate else loss.new_tensor(float("nan"))
-            )
-            fusion_entropy = outputs.get("fusion_entropy", [])
-            fusion_entropy_mean = (
-                torch.stack([value.mean() for value in fusion_entropy]).mean()
-                if fusion_entropy else loss.new_tensor(float("nan"))
-            )
-            if isinstance(batch.get("validity"), Mapping):
-                if "s2_valid" in batch["validity"]:
-                    both_valid = (
-                        torch.minimum(batch["validity"]["s1_valid"], batch["validity"]["s2_valid"]) > 0.5
-                    ).float().mean()
-                else:
-                    both_valid = (batch["validity"]["s1_event_support"] > 0.5).float().mean()
-            else:
-                both_valid = loss.new_tensor(float("nan"))
             step_row = {
                 "epoch": epoch,
                 "batch": batch_index,
@@ -841,21 +774,15 @@ def train_one_epoch(
                 "compute_time_seconds": interval_compute_time,
                 "graph_gate_mean": float(graph.get("gate_mean", loss.new_tensor(float("nan"))).detach().cpu()),
                 "graph_gamma_mean": float(graph.get("gamma_mean", loss.new_tensor(float("nan"))).detach().cpu()),
-                "terrain_gate_mean": float(terrain_gate_mean.detach().cpu()),
+                "s1_event_support_fraction": float(
+                    batch["validity"]["s1_event_support"].float().mean().detach().cpu()
+                ),
                 "uncertainty_scale_mean": float(uncertainty.mean().cpu()),
                 "uncertainty_scale_p90": float(torch.quantile(uncertainty.flatten(), 0.9).cpu()),
                 "gpu_allocated_bytes": torch.cuda.memory_allocated(device) if device.type == "cuda" else 0,
                 "gpu_reserved_bytes": torch.cuda.memory_reserved(device) if device.type == "cuda" else 0,
             }
             step_row.update(diagnostic_values)
-            if modality_weights:
-                step_row.update({
-                    "modality_weight_mean": float(modality_mean.detach().cpu()),
-                    "s1_weight_mean": float(s1_weight_mean.detach().cpu()),
-                    "s2_weight_mean": float(s2_weight_mean.detach().cpu()),
-                    "fusion_entropy_mean": float(fusion_entropy_mean.detach().cpu()),
-                    "both_sensor_valid_ratio": float(both_valid.detach().cpu()),
-                })
             append_csv(run_dir / "train_steps.csv", step_row)
             interval_start = now
             interval_samples = 0
@@ -885,15 +812,9 @@ def train_one_epoch(
 def environment_payload(device: torch.device) -> dict[str, Any]:
     return {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "python": sys.version,
-        "platform": platform.platform(),
-        "torch": torch.__version__,
-        "torch_cuda_build": torch.version.cuda,
         "cuda_available": torch.cuda.is_available(),
         "device": str(device),
         "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
-        "numpy": np.__version__,
-        "rasterio": rasterio.__version__,
         "conda_prefix": os.environ.get("CONDA_PREFIX"),
     }
 
@@ -1021,14 +942,9 @@ def run_training(args: argparse.Namespace) -> Path:
     best_raw_metric, best_ema_metric = float("inf"), float("inf")
     if args.resume is not None:
         current_identity = training_identity_sha256(
-            jsonable_config(config), fingerprint, version=3,
+            jsonable_config(config),
+            fingerprint,
             training_context=training_context,
-        )
-        legacy_identity = training_identity_sha256(
-            jsonable_config(config), fingerprint, version=2
-        )
-        legacy_v1_identity = training_identity_sha256(
-            jsonable_config(config), fingerprint, version=1
         )
         checkpoint = load_checkpoint(
             args.resume,
@@ -1041,8 +957,6 @@ def run_training(args: argparse.Namespace) -> Path:
             restore_rng=True,
             map_location=device,
             expected_training_identity_sha256=current_identity,
-            expected_legacy_training_identity_sha256=legacy_identity,
-            expected_legacy_v1_training_identity_sha256=legacy_v1_identity,
         )
         if ema is not None:
             restored_ema = restore_ema_after_checkpoint_load(ema, checkpoint, model)
@@ -1060,7 +974,7 @@ def run_training(args: argparse.Namespace) -> Path:
             )
         checkpoint_semantics = checkpoint_depth_output_semantics(checkpoint)
         configured_semantics = str(
-            config["model"].get("depth_output_semantics", "probability_weighted_v1")
+            config["model"].get("depth_output_semantics", "conditional_positive")
         )
         if checkpoint_semantics != configured_semantics:
             raise RuntimeError(
@@ -1094,15 +1008,7 @@ def run_training(args: argparse.Namespace) -> Path:
         saved_extra = checkpoint.get("extra", {})
         best_raw_metric = float(saved_extra.get("best_raw_metric", best_metric))
         best_ema_metric = float(saved_extra.get("best_ema_metric", best_metric))
-        patience = int(checkpoint.get("extra", {}).get("early_stop_patience", -1))
-        if patience < 0:
-            patience = infer_legacy_patience(
-                run_dir / "metrics_by_epoch.csv",
-                int(checkpoint["epoch"]),
-                monitor,
-                str(config["training"].get("best_weights", "raw")),
-                float(config["training"].get("min_delta", 0.0)),
-            )
+        patience = int(checkpoint.get("extra", {}).get("early_stop_patience", 0))
         if world_size > 1:
             derived_seed = int(config["seed"]) + rank + 1_000_003 * start_epoch
             seed_everything(derived_seed, bool(config["deterministic"]))
@@ -1136,7 +1042,7 @@ def run_training(args: argparse.Namespace) -> Path:
                 "trainable_parameters": trainable_parameters,
                 "positive_prior": prior,
                 "depth_output_semantics": config["model"].get(
-                    "depth_output_semantics", "probability_weighted_v1"
+                    "depth_output_semantics", "conditional_positive"
                 ),
                 "best_metric": monitor,
                 "depth_stratification_edges_m": depth_bins,

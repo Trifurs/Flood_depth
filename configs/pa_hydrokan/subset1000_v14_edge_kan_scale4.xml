@@ -1,2 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<config><include path="subset1000_v14_edge_kan_prior_residual.xml" /><run_name type="str">pa_hydrokan_subset1000_hydrov14_edge_kan_scale4</run_name><model><graph_scale type="int">4</graph_scale></model></config>

@@ -1,57 +1,57 @@
-# PA-HydroKAN optical-free flood-depth estimation
+# Flood-depth estimation from SAR and terrain
 
-This repository contains the active Sentinel-1 SAR + DSM implementation for
-event-aggregated flood-depth estimation. Sentinel-2/optical imagery is not read,
-passed to, or fused by the active depth model.
+This is the production code path for flood-depth estimation using Sentinel-1
+state, event, change, acquisition-reliability, and terrain inputs. Labels and
+label-derived masks are used only for supervision and evaluation.
 
-## Active models
+The project intentionally contains one model, one dataset-input contract, and
+one default configuration. Checkpoints, comparisons, and alternative sensor
+paths are not included.
 
-- `pa_hydrokan_s1_v14`: S1-only baseline.
-- `pa_hydrokan_s1_v15`: SAR-first hydrology refactor with masked state/change
-  encoding, incidence-angle conditioning, terrain/reliability residual fusion,
-  multi-scale context, and conditional positive-depth heads.
+## Layout
 
-The dataset is `/home/whu/桌面/myData/Flood_depth/subset1000`. Its runtime view is
-defined by `input_mode=s1_terrain`; invalid S1/DSM pixels are excluded through the
-explicit validity contract. The label and masks are never passed to the model.
+- `configs/config.xml` — default training and inference configuration.
+- `assets/` — audited dataset contract and train-only normalization statistics.
+- `models/` — SAR encoder, terrain features, Edge-KAN graph, decoder, and heads.
+- `tools/` — train, evaluate, and single-sample inference commands.
+- `runs/` — locally generated training outputs; ignored by Git.
 
-## Recommended GPU run
+## Train
+
+Install a PyTorch build suitable for the local accelerator, then install the
+remaining packages:
 
 ```bash
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+pip install -r requirements.txt
 conda run -n flood-depth python tools/train.py \
-  --config configs/pa_hydrokan/subset1000_s1_v15_gpu_precision.xml \
-  --output runs/optimization/hydrokan_s1_v15/gpu_precision_full \
-  --device cuda \
-  --init-checkpoint runs/optimization/hydrokan_s1_v15/init_gpu_precision_from_v14.pth
+  --config configs/config.xml \
+  --device cuda
 ```
 
-Evaluate the best checkpoint with the frozen output-validity definition:
+Training creates a timestamped directory under `runs/train/`. It includes the
+resolved configuration, dataset fingerprint, calibration artifacts, raw and
+EMA checkpoints, metrics, and runtime metadata.
+
+## Evaluate
 
 ```bash
 conda run -n flood-depth python tools/evaluate.py \
-  --config configs/pa_hydrokan/subset1000_s1_v15_gpu_precision.xml \
-  --checkpoint runs/optimization/hydrokan_s1_v15/gpu_precision_full/best.pth \
-  --split test \
-  --output artifacts/optimization/hydrokan_s1_v15/gpu_precision_test_output_valid \
-  --device cuda --validity-mask output_valid
+  --config configs/config.xml \
+  --checkpoint runs/train/<run>/best_raw.pth \
+  --split val \
+  --device cuda
 ```
 
-The matched S1-only v14 baseline uses
-`configs/pa_hydrokan/subset1000_s1_v14_gpu.xml`.
-
-## Verification
+## Infer one known sample
 
 ```bash
-conda run -n flood-depth python -m pytest -q
+conda run -n flood-depth python tools/infer.py \
+  --config configs/config.xml \
+  --checkpoint runs/train/<run>/best_raw.pth \
+  --input <sample-id> \
+  --device cuda \
+  --save-geotiff
 ```
 
-The latest verification passed with `126 passed, 2 skipped`. Machine-readable
-comparison results are in
-`artifacts/optimization/hydrokan_s1_v15/candidate_summary.json`, and the detailed
-experiment report is `docs/HYDROKAN_S1_V15_REFACTOR_REPORT.md`.
-
-The old optical/S2 depth-model versions, comparison adapters, configurations,
-diagnostics, tests, and their experiment records have been removed from this
-working tree. Generic dataset-contract fields retain their audited source schema,
-but the active model input contract is S1-only.
+No trained checkpoint is bundled: previous training results were deliberately
+removed before this production reset.

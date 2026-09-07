@@ -23,13 +23,7 @@ def event_weights(event_ids: Sequence[str]) -> torch.Tensor:
 
 
 def make_event_balanced_sampler(event_ids: Sequence[str], seed: int) -> WeightedRandomSampler:
-    """Legacy inverse-frequency sampler.
-
-    This is retained only so old resolved configurations can still be reproduced.
-    The main configuration uses :class:`EventEpochSampler`, because subset150 has
-    exactly one sample per source event and replacement would omit roughly one third
-    of the events in every nominal epoch.
-    """
+    """Return an inverse-frequency event-balanced sampler with replacement."""
 
     generator = torch.Generator().manual_seed(seed)
     return WeightedRandomSampler(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate a registered model on val or test with partial-positive metrics."""
+"""Evaluate the production model with partial-positive metrics."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def frozen_depth_balance_for_config(config: dict[str, Any]) -> FrozenSoftDepthBa
 
     loss = config.get("loss", {})
     if not (
-        str(loss.get("objective_mode", "legacy")) == "task_adaptive"
+        str(loss.get("objective_mode", "task_adaptive")) == "task_adaptive"
         and bool(loss.get("soft_depth_balance", False))
     ):
         return None
@@ -101,10 +101,9 @@ def dataset_fingerprint(config: dict[str, Any]) -> dict[str, str]:
         "normalization_sha256": sha256_file(Path(config["dataset"]["train_stats"])),
     }
     input_spec = ModelInputSpec.from_config(config)
-    if "input_mode" in config.get("dataset", {}) or str(config["model"]["name"]) == "pa_hydrokan_s1_v14":
-        fingerprint["model_input_spec_sha256"] = input_spec.sha256
-        fingerprint["active_groups_sha256"] = input_spec.active_groups_sha256
-        fingerprint["reliability_spec_sha256"] = ReliabilitySpec.from_mode(input_spec.mode).sha256
+    fingerprint["model_input_spec_sha256"] = input_spec.sha256
+    fingerprint["active_groups_sha256"] = input_spec.active_groups_sha256
+    fingerprint["reliability_spec_sha256"] = ReliabilitySpec.from_mode(input_spec.mode).sha256
     edge_stats = config.get("model", {}).get("graph_edge_stats")
     if edge_stats is not None:
         path = Path(edge_stats).expanduser().resolve(strict=True)
@@ -265,7 +264,11 @@ def evaluate_loader(
                 batch["reliability"][sample_index, day_index:day_index + 1].detach().cpu().numpy()
                 if day_index is not None else np.zeros_like(target)
             )
-            observation_indices = [reliability_index[name] for name in ("s1_event_observation_count_z", "s2_pre_clear_observation_count_z", "s2_event_clear_observation_count_z") if name in reliability_index]
+            observation_indices = [
+                reliability_index[name]
+                for name in ("s1_event_observation_count_z",)
+                if name in reliability_index
+            ]
             observation = batch["reliability"][sample_index, observation_indices].mean(dim=0, keepdim=True).detach().cpu().numpy() if observation_indices else np.zeros_like(sensor_day)
             row = aggregator.add(
                 sample_id,
@@ -388,7 +391,6 @@ def evaluate_loader(
                 save_prediction_panel(
                     sample_dir / "prediction_panel.png",
                     s1_change=cpu_batch["s1_change"][sample_index, 0].numpy(),
-                    s2_change=(cpu_batch["s2_change"][sample_index, 0].numpy() if "s2_change" in cpu_batch else None),
                     dsm=cpu_batch["terrain_raw"][sample_index, 0].numpy(),
                     target=target[0],
                     prediction=prediction[0],
@@ -442,7 +444,6 @@ def run_evaluation(
     max_batches: int | None = None,
     weights: str = "raw",
     validity_mask: str | None = None,
-    output_semantics_override: str | None = None,
 ) -> dict[str, Any]:
     config = embed_source_fingerprints(load_config(config_path))
     if split not in {"val", "test"}:
@@ -484,11 +485,6 @@ def run_evaluation(
         model.load_state_dict(ema_state, strict=True)
     elif weights != "raw":
         raise ValueError("weights must be raw or ema")
-    if output_semantics_override is not None:
-        setter = getattr(getattr(model, "heads", None), "set_depth_output_semantics", None)
-        if not callable(setter):
-            raise ValueError("The selected model does not support output semantics override")
-        setter(output_semantics_override)
     checkpoint_epoch = int(checkpoint.get("epoch", 0))
     normalizer = RobustNormalizer(Path(config["dataset"]["train_stats"]), dataset.contract)
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
@@ -545,7 +541,6 @@ def parse_args() -> argparse.Namespace:
         "--validity-mask",
         choices=(CANONICAL_POSITIVE_MASK, "output_valid", "common_s1", "s1_event_support"),
     )
-    parser.add_argument("--output-semantics", choices=("conditional_positive_v2", "probability_weighted_v1"))
     return parser.parse_args()
 
 
@@ -563,7 +558,6 @@ def main() -> int:
         args.max_batches,
         args.weights,
         args.validity_mask,
-        args.output_semantics,
     )
     print(summary)
     return 0

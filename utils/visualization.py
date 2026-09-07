@@ -19,7 +19,6 @@ def save_prediction_panel(
     path: Path,
     *,
     s1_change: np.ndarray,
-    s2_change: np.ndarray | None = None,
     dsm: np.ndarray,
     target: np.ndarray,
     prediction: np.ndarray,
@@ -29,9 +28,7 @@ def save_prediction_panel(
     path.parent.mkdir(parents=True, exist_ok=True)
     target_view = np.where(valid_label, target, np.nan)
     error_view = np.where(valid_label, np.abs(prediction - target), np.nan)
-    panels = [(s1_change, "S1 representative change", "coolwarm")]
-    if s2_change is not None:
-        panels.append((s2_change, "S2 representative change", "coolwarm"))
+    panels = [(s1_change, "SAR change", "coolwarm")]
     panels.extend([
         (dsm, "DSM (m)", "terrain"),
         (target_view, "Target depth (m)", "Blues"),

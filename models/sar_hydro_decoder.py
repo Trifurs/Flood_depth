@@ -1,4 +1,4 @@
-"""Independent-gate decoder for the optical-free Hydro-v14 model."""
+"""Independent-gate decoder for SAR-and-terrain flood-depth features."""
 
 from __future__ import annotations
 

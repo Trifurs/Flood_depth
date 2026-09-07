@@ -1,0 +1,51 @@
+<config>
+  <dataset>
+    <name type="str">flood_depth_s1</name>
+    <root type="path">/home/whu/桌面/myData/Flood_depth/subset1000</root>
+    <contract type="path">assets/dataset_contract.json</contract>
+    <manifest type="path">/home/whu/桌面/myData/Flood_depth/subset1000/metadata/training_manifest.csv</manifest>
+    <train_stats type="path">assets/train_stats.json</train_stats>
+    <patch_size type="int">256</patch_size>
+    <input_mode type="str">s1_terrain</input_mode>
+    <minimum_event_band_fraction type="float">1.0</minimum_event_band_fraction>
+    <continuous_groups type="list" item_type="str">
+      <item>s1_t1</item><item>s1_t2</item><item>s1_change</item><item>terrain</item>
+    </continuous_groups>
+    <model_s1_qa_names type="list" item_type="str"></model_s1_qa_names>
+    <normalization>
+      <clip_lower_percentile type="float">0.5</clip_lower_percentile>
+      <clip_upper_percentile type="float">99.5</clip_upper_percentile>
+      <invalid_fill type="float">0.0</invalid_fill>
+      <qa_counts_log1p type="bool">true</qa_counts_log1p>
+      <day_offset_by_event_duration type="bool">true</day_offset_by_event_duration>
+    </normalization>
+    <sampling>
+      <event_balanced type="bool">true</event_balanced>
+      <replacement type="bool">false</replacement>
+    </sampling>
+    <augmentation>
+      <horizontal_flip_probability type="float">0.5</horizontal_flip_probability>
+      <vertical_flip_probability type="float">0.5</vertical_flip_probability>
+      <rotate90_probability type="float">0.0</rotate90_probability>
+      <feature_dropout_probability type="float">0.0</feature_dropout_probability>
+      <sensor_missing_simulation_probability type="float">0.0</sensor_missing_simulation_probability>
+    </augmentation>
+    <positive_prior>
+      <mode type="str">auto</mode>
+      <value type="float">0.1</value>
+      <minimum type="float">0.01</minimum>
+      <maximum type="float">0.5</maximum>
+    </positive_prior>
+    <model_bands>
+      <s1_t1 type="list"><item>VV_pre_db</item><item>VH_pre_db</item></s1_t1>
+      <s1_t2 type="list"><item>VV_event_db</item><item>VH_event_db</item></s1_t2>
+      <s1_change type="list"><item>VV_delta_db</item><item>VH_delta_db</item><item>anomaly_raw</item></s1_change>
+      <s1_conditioning type="list"><item>angle_pre_deg</item><item>angle_event_deg</item></s1_conditioning>
+      <terrain type="list"><item>elevation_m_DSM</item><item>slope_deg</item></terrain>
+    </model_bands>
+  </dataset>
+  <supervision>
+    <positive_mask type="str">valid_depth_mask_and_output_valid</positive_mask>
+    <validation_mask type="str">valid_depth_mask_and_output_valid</validation_mask>
+  </supervision>
+</config>

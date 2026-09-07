@@ -559,7 +559,7 @@ def event_depth_exceedance_loss(
             )
         else:
             # Exceedance thresholds are already balanced explicitly. Event/depth
-            # modes therefore retain the historical event-macro reduction.
+            # modes use event-macro reduction.
             threshold_losses.append(
                 event_macro_masked_mean(pixels, positive_mask, event_ids)
             )

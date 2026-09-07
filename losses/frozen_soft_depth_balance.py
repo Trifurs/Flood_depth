@@ -163,45 +163,6 @@ class FrozenSoftDepthBalance:
             train_weight_max=float(final_values.max()),
         )
 
-    @classmethod
-    def from_bin_counts(
-        cls,
-        depth_knots_m: Sequence[float],
-        bin_counts: Sequence[float],
-        *,
-        minimum: float = 0.5,
-        maximum: float = 3.0,
-        alpha: float = 0.5,
-        tau: float = 10.0,
-    ) -> "FrozenSoftDepthBalance":
-        """Construct a static compatibility curve from train-bin counts only.
-
-        New V15.2 training uses :meth:`from_train_depths`, whose normalizer is
-        exact over all canonical train pixels.  This method exists for callers
-        with legacy train artifacts that retained counts but not individual
-        depths; critically, it is still batch invariant.
-        """
-
-        knots = _validate_knots(depth_knots_m)
-        if len(bin_counts) != len(knots) - 1:
-            raise ValueError("bin_counts must contain one entry per knot interval")
-        counts = torch.as_tensor(bin_counts, dtype=torch.float64, device="cpu")
-        if not torch.isfinite(counts).all() or torch.any(counts < 0.0):
-            raise ValueError("bin_counts must be finite and nonnegative")
-        centres = 0.5 * (torch.tensor(knots[:-1]) + torch.tensor(knots[1:]))
-        repetitions = counts.round().to(torch.int64)
-        if int(repetitions.sum()) <= 0:
-            raise ValueError("bin_counts must contain at least one positive train pixel")
-        representative_depths = torch.repeat_interleave(centres.to(torch.float64), repetitions)
-        return cls.from_train_depths(
-            representative_depths,
-            knots,
-            minimum=minimum,
-            maximum=maximum,
-            alpha=alpha,
-            tau=tau,
-        )
-
     def weights(self, target: torch.Tensor, positive: torch.Tensor | None = None) -> torch.Tensor:
         """Return frozen bounded weights; never inspect batch composition."""
 
@@ -217,7 +178,7 @@ class FrozenSoftDepthBalance:
 
     def _payload_without_sha256(self) -> dict[str, Any]:
         return {
-            "schema_version": "1.0",
+            "schema": "frozen_soft_depth_balance",
             "kind": "frozen_soft_depth_balance",
             "runtime_rule": "weight = clamp(normalization_constant * interpolate(raw_weights, target), minimum, maximum); no minibatch normalization",
             "depth_knots_m": list(self.depth_knots_m),

@@ -1,4 +1,4 @@
-"""Small task head shared by the optical-free S1 model family."""
+"""Small task head for the production flood-depth model."""
 
 from __future__ import annotations
 

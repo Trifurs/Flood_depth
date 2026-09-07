@@ -1,7 +1,9 @@
-"""Atomic, fingerprint-strict checkpoints with RNG restoration."""
+"""Atomic, fingerprint-strict checkpoints with optional RNG restoration."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 import random
@@ -10,8 +12,6 @@ from typing import Any, Mapping
 
 import numpy as np
 import torch
-import hashlib
-import json
 
 
 class CheckpointError(RuntimeError):
@@ -22,15 +22,9 @@ def training_identity_sha256(
     resolved_config: Mapping[str, Any],
     dataset_fingerprint: Mapping[str, str],
     *,
-    version: int = 2,
     training_context: Mapping[str, Any] | None = None,
 ) -> str:
-    """Hash every semantic field that must remain fixed across resume.
-
-    Version 1 reproduces checkpoints written during the initial Hydro-v13 run.
-    Version 2 additionally names the reliability schema explicitly; older files
-    remain resumable only when their original v1 identity matches exactly.
-    """
+    """Hash the training semantics that must remain fixed for a resume."""
 
     identity_fields = {
         key: resolved_config.get(key)
@@ -39,29 +33,28 @@ def training_identity_sha256(
     dataset_config = resolved_config.get("dataset", {})
     if isinstance(dataset_config, Mapping):
         identity_fields["model_bands"] = dataset_config.get("resolved_model_bands")
-        if version >= 2:
-            identity_fields["reliability_schema"] = dataset_config.get(
-                "resolved_reliability_schema"
-            )
+        identity_fields["reliability_schema"] = dataset_config.get(
+            "resolved_reliability_schema"
+        )
     identity_fields["dataset_fingerprint"] = dict(dataset_fingerprint)
-    if version >= 3:
-        identity_fields["training_context"] = dict(training_context or {})
+    identity_fields["training_context"] = dict(training_context or {})
     return hashlib.sha256(
         json.dumps(identity_fields, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
 
 
 def checkpoint_depth_output_semantics(checkpoint: Mapping[str, Any]) -> str:
-    """Resolve output semantics, treating pre-v2 checkpoints as legacy products."""
+    """Read the sole supported depth-output semantic contract."""
 
+    explicit = checkpoint.get("output_semantics")
+    if explicit is not None:
+        return str(explicit)
     resolved = checkpoint.get("resolved_config", {})
     if isinstance(resolved, Mapping):
         model_config = resolved.get("model", {})
         if isinstance(model_config, Mapping):
-            return str(
-                model_config.get("depth_output_semantics", "probability_weighted_v1")
-            )
-    return "probability_weighted_v1"
+            return str(model_config.get("depth_output_semantics", "conditional_positive"))
+    return "conditional_positive"
 
 
 def capture_rng_state() -> dict[str, Any]:
@@ -76,9 +69,6 @@ def capture_rng_state() -> dict[str, Any]:
 def restore_rng_state(state: Mapping[str, Any]) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    # ``map_location=cuda`` also moves the serialized CPU RNG tensor to CUDA,
-    # while PyTorch's RNG setters require CPU byte tensors.  Accept list-like
-    # states as well so checkpoints remain robust across serialization formats.
     torch_cpu = state["torch_cpu"]
     if torch.is_tensor(torch_cpu):
         torch_cpu = torch_cpu.detach().to(device="cpu", dtype=torch.uint8)
@@ -129,13 +119,9 @@ def save_checkpoint(
     training_context: Mapping[str, Any] | None = None,
     global_step: int = 0,
 ) -> None:
+    """Save model and optimizer state atomically."""
+
     unwrapped = model.module if hasattr(model, "module") else model
-    identity_hash = training_identity_sha256(
-        resolved_config,
-        dataset_fingerprint,
-        version=3 if training_context is not None else 2,
-        training_context=training_context,
-    )
     payload = {
         "model": unwrapped.state_dict(),
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
@@ -148,9 +134,11 @@ def save_checkpoint(
         "resolved_config": dict(resolved_config),
         "dataset_fingerprint": dict(dataset_fingerprint),
         "extra": dict(extra or {}),
-        "training_identity_sha256": identity_hash,
-        "training_identity_version": 3 if training_context is not None else 2,
+        "training_identity_sha256": training_identity_sha256(
+            resolved_config, dataset_fingerprint, training_context=training_context
+        ),
         "training_identity_context": dict(training_context or {}),
+        "output_semantics": "conditional_positive",
         "ema": ema.state_dict() if ema is not None else None,
         "ema_model": ema.model_state_dict() if ema is not None else None,
     }
@@ -169,33 +157,23 @@ def load_checkpoint(
     map_location: str | torch.device = "cpu",
     adopt_checkpoint_output_semantics: bool = True,
     expected_training_identity_sha256: str | None = None,
-    expected_legacy_training_identity_sha256: str | None = None,
-    expected_legacy_v1_training_identity_sha256: str | None = None,
 ) -> dict[str, Any]:
+    """Load a checkpoint after validating its dataset and training identity."""
+
     checkpoint = torch.load(Path(path), map_location=map_location, weights_only=False)
     if expected_fingerprint is not None and dict(checkpoint.get("dataset_fingerprint", {})) != dict(
         expected_fingerprint
     ):
         if not allow_fingerprint_mismatch:
             raise CheckpointError(
-                "Dataset contract/manifest/normalization fingerprint differs from checkpoint; "
-                "refusing resume without the explicit dangerous override"
+                "Dataset contract, manifest, or normalization fingerprint differs from checkpoint"
             )
     if expected_training_identity_sha256 is not None:
         saved_identity = checkpoint.get("training_identity_sha256")
-        identity_version = int(checkpoint.get("training_identity_version", 1))
-        expected_identity = (
-            expected_training_identity_sha256
-            if identity_version >= 3
-            else expected_legacy_training_identity_sha256
-            if identity_version == 2
-            else expected_legacy_v1_training_identity_sha256
-        )
-        if saved_identity is None or expected_identity is None or saved_identity != expected_identity:
+        if saved_identity != expected_training_identity_sha256:
             raise CheckpointError(
-                "Training identity differs from checkpoint; model structure, BandSpec, "
-                "reliability schema, loss, optimizer, scheduler, and dataset semantics "
-                "must remain unchanged when resuming"
+                "Training identity differs from checkpoint; start a new run for changed "
+                "model, data, loss, optimizer, or scheduler semantics"
             )
     unwrapped = model.module if hasattr(model, "module") else model
     unwrapped.load_state_dict(checkpoint["model"], strict=True)

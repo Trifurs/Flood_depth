@@ -1,1 +1,0 @@
-<?xml version="1.0"?><config><include path="../subset150_v13_compact.xml"/><run_name type="str">v13_screen_no_gradient</run_name><loss><lambda_gradient type="float">0.0</lambda_gradient></loss></config>

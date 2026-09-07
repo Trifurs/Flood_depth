@@ -1,2 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<config><include path="subset1000_v14_bands_selected.xml" /><run_name type="str">pa_hydrokan_subset1000_hydrov14_no_graph</run_name><model><graph_enabled type="bool">false</graph_enabled></model></config>

@@ -1,4 +1,4 @@
-"""Configured PA-HydroKAN objective with strict partial-label masking."""
+"""Production flood-depth objective with strict partial-label masking."""
 
 from __future__ import annotations
 
@@ -17,8 +17,6 @@ from losses.depth_losses import (
 from losses.physics_losses import (
     gated_terrain_order_loss,
     reference_gated_wse_gradient_loss,
-    terrain_order_violation_loss,
-    tolerant_wse_slope_loss,
     weak_physics_pair_loss,
     weak_wse_laplacian_loss,
 )
@@ -166,8 +164,7 @@ class CompositeFloodDepthLoss(nn.Module):
             "depth_bin_macro",
             "sample_depth_bin",
         }
-        # Pixel-first deployment must be invariant to event labels. Event metadata
-        # remains available only for frozen legacy objectives and diagnostics.
+        # Pixel-first deployment is invariant to event labels.
         events = None if event_independent else _event_ids(batch)
         auxiliary_aggregation = (
             "pixel_micro"
@@ -185,34 +182,21 @@ class CompositeFloodDepthLoss(nn.Module):
         zero = label.sum() * 0.0
         lambda_final = float(self.config["lambda_final"])
         prediction = outputs.get("conditional_depth", outputs["positive_depth"])
-        if str(self.config.get("objective_mode", "legacy")) == "task_adaptive":
-            components = task_adaptive_positive_depth_loss(
-                prediction, label, positive, self.train_depth_bins,
-                beta_m=float(self.config.get("depth_huber_beta_m", 0.5)),
-                log_weight=float(self.config.get("lambda_log", 0.15)),
-                balance=bool(self.config.get("soft_depth_balance", True)),
-                under_alpha=float(self.config.get("tail_underprediction_alpha", 0.0)),
-                under_min_m=float(self.config.get("depth_underprediction_min_m", 0.48)),
-                balance_alpha=float(self.config.get("soft_depth_balance_alpha", 0.5)),
-                balance_tau=float(self.config.get("soft_depth_balance_tau", 10.0)),
-                train_bin_counts=self.train_depth_bin_counts or None,
-                frozen_depth_balance=self.frozen_depth_balance,
-                log_beta=float(self.config.get("log_depth_huber_beta", 1.0)),
-            )
-        else:
-            components = positive_depth_losses(
-                prediction,
-                outputs.get("expected_depth", outputs["depth"])
-                if lambda_final != 0.0 and bool(self.config.get("support_weighted_supervision", True)) else None,
-                label, positive, events, float(self.config["lambda_log"]),
-                lambda_final, self.train_depth_bins, self.primary_depth_bins,
-                float(self.config.get("depth_bias_beta_m", 0.1)),
-                float(self.config.get("depth_underprediction_factor", 1.0)),
-                float(self.config.get("depth_underprediction_min_m", 0.0)),
-                aggregation_mode, str(self.config.get("depth_linear_loss", "smooth_l1")),
-                float(self.config.get("depth_huber_beta_m", 1.0)),
-                float(self.config.get("log_depth_huber_beta", 1.0)),
-            )
+        if str(self.config.get("objective_mode", "task_adaptive")) != "task_adaptive":
+            raise ValueError("Only the task-adaptive production objective is supported")
+        components = task_adaptive_positive_depth_loss(
+            prediction, label, positive, self.train_depth_bins,
+            beta_m=float(self.config.get("depth_huber_beta_m", 0.5)),
+            log_weight=float(self.config.get("lambda_log", 0.15)),
+            balance=bool(self.config.get("soft_depth_balance", True)),
+            under_alpha=float(self.config.get("tail_underprediction_alpha", 0.0)),
+            under_min_m=float(self.config.get("depth_underprediction_min_m", 0.48)),
+            balance_alpha=float(self.config.get("soft_depth_balance_alpha", 0.5)),
+            balance_tau=float(self.config.get("soft_depth_balance_tau", 10.0)),
+            train_bin_counts=self.train_depth_bin_counts or None,
+            frozen_depth_balance=self.frozen_depth_balance,
+            log_beta=float(self.config.get("log_depth_huber_beta", 1.0)),
+        )
         exceedance = (
             event_depth_exceedance_loss(
                 outputs["depth"], label, positive, events, self.train_depth_bins,
@@ -281,15 +265,9 @@ class CompositeFloodDepthLoss(nn.Module):
         for index, value in enumerate(auxiliary_terms):
             components[f"auxiliary_{index}"] = value
         sensor_valid = validity["s1_valid"]
-        if "s2_valid" in validity:
-            sensor_valid = torch.maximum(sensor_valid, validity["s2_valid"])
-        reliability_names = _reliability_names(batch)
         day_difference = batch["reliability"].new_zeros(
             batch["reliability"].shape[0], 1, *batch["reliability"].shape[-2:]
         )
-        if "absolute_normalized_sensor_day_difference" in reliability_names:
-            day_index = reliability_names.index("absolute_normalized_sensor_day_difference")
-            day_difference = batch["reliability"][:, day_index : day_index + 1]
         wse_mode = str(self.config.get("wse_mode", "absolute_laplacian"))
         if effective_wse == 0.0:
             wse = zero
@@ -310,24 +288,6 @@ class CompositeFloodDepthLoss(nn.Module):
                 auxiliary_aggregation,
             )
         elif wse_mode == "terrain_order":
-            wse = terrain_order_violation_loss(
-                outputs["depth"],
-                outputs["physical_features"]["z_hyd"],
-                positive,
-                validity["dem_valid"],
-                sensor_valid,
-                day_difference,
-                events,
-                float(self.config["wse_time_sigma"]),
-                float(self.config["terrain_order_min_step_m"]),
-                float(self.config["terrain_order_max_step_m"]),
-                float(self.config["terrain_order_beta_m"]),
-                auxiliary_aggregation,
-                outputs["physical_features"].get("local_relief"),
-                float(self.config.get("terrain_order_high_relief_threshold_m", 12.0)),
-                float(self.config.get("terrain_order_high_relief_decay_m", 8.0)),
-            )
-        elif wse_mode == "v14_terrain_order":
             wse, order_diag = gated_terrain_order_loss(
                 outputs["conditional_depth"], outputs["physical_features"]["physics_elevation"],
                 positive, validity["dem_valid"], sensor_valid,
@@ -342,19 +302,6 @@ class CompositeFloodDepthLoss(nn.Module):
             )
             components["terrain_order_violation_fraction"] = order_diag["violation_fraction"]
             components["terrain_order_violation_magnitude"] = order_diag["violation_magnitude"]
-        elif wse_mode == "v14_wse_slope":
-            wse, slope_diag = tolerant_wse_slope_loss(
-                outputs["conditional_depth"], outputs["physical_features"]["physics_elevation"],
-                positive, validity["dem_valid"], sensor_valid,
-                pixel_size_m=float(self.config.get("terrain_pixel_size_m", 20.0)),
-                wse_slope_tolerance=float(self.config.get("wse_slope_tolerance", 0.02)),
-                huber_beta=float(self.config.get("wse_slope_huber_beta", 0.01)),
-                relief=outputs["physical_features"].get("local_relief"),
-                relief_threshold_m=float(self.config.get("wse_relief_threshold_m", 12.0)),
-                return_diagnostics=True,
-            )
-            components["wse_slope_violation_fraction"] = slope_diag["violation_fraction"]
-            components["wse_slope_violation_magnitude"] = slope_diag["violation_magnitude"]
         elif wse_mode == "absolute_laplacian":
             wse = weak_wse_laplacian_loss(
                 outputs["depth"],
@@ -368,7 +315,7 @@ class CompositeFloodDepthLoss(nn.Module):
         else:
             raise ValueError(
                 "loss.wse_mode must be 'absolute_laplacian', "
-                f"'reference_gated_gradient', 'terrain_order', 'v14_terrain_order', or 'v14_wse_slope', got {wse_mode!r}"
+                f"'reference_gated_gradient', or 'terrain_order', got {wse_mode!r}"
             )
         components["wse"] = wse
         if effective_physics == 0.0:

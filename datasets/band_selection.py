@@ -10,11 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from datasets.contract import DatasetContract, MODEL_CONTINUOUS_GROUPS
+from datasets.contract import DatasetContract
 from datasets.model_input_spec import ModelInputSpec
 
 
-MODEL_BAND_GROUPS = (*MODEL_CONTINUOUS_GROUPS, "s1_conditioning")
+MODEL_BAND_GROUPS = ("s1_t1", "s1_t2", "s1_change", "terrain", "s1_conditioning")
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class BandSpec:
     """An immutable, ordered selection resolved against exact descriptions."""
 
     groups: Mapping[str, SelectedBands]
-    legacy_full_bands: bool = False
+    uses_default_bands: bool = False
 
     @classmethod
     def resolve(
@@ -40,7 +40,7 @@ class BandSpec:
         configured: Mapping[str, Sequence[str]] | None,
         required_groups: Sequence[str] | None = None,
     ) -> "BandSpec":
-        required = tuple(required_groups or MODEL_CONTINUOUS_GROUPS)
+        required = tuple(required_groups or ("s1_t1", "s1_t2", "s1_change", "terrain"))
         if configured is None:
             return cls(
                 {
@@ -50,7 +50,7 @@ class BandSpec:
                     )
                     for group in required
                 } | {"s1_conditioning": SelectedBands((), ())},
-                legacy_full_bands=True,
+                uses_default_bands=True,
             )
         unknown_groups = set(configured).difference(MODEL_BAND_GROUPS)
         if unknown_groups:
@@ -71,8 +71,6 @@ class BandSpec:
             )
         if "s1_t1" in resolved and "s1_t2" in resolved:
             cls._validate_temporal_pair(resolved["s1_t1"].names, resolved["s1_t2"].names, "S1")
-        if "s2_t1" in resolved and "s2_t2" in resolved:
-            cls._validate_temporal_pair(resolved["s2_t1"].names, resolved["s2_t2"].names, "S2")
         conditioning = tuple(str(value) for value in configured.get("s1_conditioning", ()))
         if len(conditioning) != len(set(conditioning)):
             raise ValueError(f"Duplicate s1_conditioning names: {conditioning}")
@@ -95,7 +93,7 @@ class BandSpec:
         empty_required = [group for group in required if not resolved[group].names]
         if empty_required:
             raise ValueError(f"Model band groups cannot be empty: {empty_required}")
-        return cls(resolved, legacy_full_bands=False)
+        return cls(resolved, uses_default_bands=False)
 
     @staticmethod
     def _temporal_base(name: str) -> str:
@@ -154,7 +152,7 @@ class BandSpec:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "legacy_full_bands": self.legacy_full_bands,
+            "uses_default_bands": self.uses_default_bands,
             "groups": {group: selected.as_dict() for group, selected in self.groups.items()},
             "channel_counts": {group: len(selected.names) for group, selected in self.groups.items()},
         }

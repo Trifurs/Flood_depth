@@ -1,0 +1,448 @@
+{
+  "dataset_root": "/home/whu/桌面/myData/Flood_depth/subset1000",
+  "key_file_sha256": {
+    "metadata/training_manifest.csv": "fb66fb590e1a06b9e3606e015ce2b12a7e135454738742643d0f7b0ca4afc40a"
+  },
+  "manifest": {
+    "relative_path": "metadata/training_manifest.csv",
+    "sha256": "fb66fb590e1a06b9e3606e015ce2b12a7e135454738742643d0f7b0ca4afc40a"
+  },
+  "normalization": {
+    "selected": {
+      "scope": "train split only; valid pixels only; validation and test excluded",
+      "sha256": "99baff5d583dc78eb9c0c0190d4a7abb573d705d9bbb69b651a0cb8253be0c23"
+    }
+  },
+  "raster_groups": {
+    "label": {
+      "aggregate_values": [
+        {
+          "description": "depth_m",
+          "invalid_pixels": 58552367,
+          "maximum": 25.469999313354492,
+          "minimum": 0.10000000149011612,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 6787025
+        }
+      ],
+      "band_count": 1,
+      "band_descriptions": [
+        "depth_m"
+      ],
+      "crs": "EPSG:27704",
+      "dtypes": [
+        "float32"
+      ],
+      "height": 256,
+      "nodata": -9999.0,
+      "observed_crs_counts": {
+        "EPSG:27704": 997
+      },
+      "path_column": "label_path",
+      "resolution": [
+        20.0,
+        20.0
+      ],
+      "role": "target",
+      "width": 256
+    },
+    "masks": {
+      "aggregate_values": [
+        {
+          "description": "valid_depth_mask",
+          "invalid_pixels": 0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339392
+        },
+        {
+          "description": "flood_mask",
+          "invalid_pixels": 0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339392
+        },
+        {
+          "description": "unknown_mask",
+          "invalid_pixels": 0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339392
+        },
+        {
+          "description": "permanent_water_mask",
+          "invalid_pixels": 0,
+          "maximum": 0.0,
+          "minimum": 0.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339392
+        },
+        {
+          "description": "extreme_high_mask",
+          "invalid_pixels": 0,
+          "maximum": 0.0,
+          "minimum": 0.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339392
+        },
+        {
+          "description": "DEM_valid_mask",
+          "invalid_pixels": 0,
+          "maximum": 1.0,
+          "minimum": 1.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339392
+        },
+        {
+          "description": "slope_valid_mask",
+          "invalid_pixels": 0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339392
+        },
+        {
+          "description": "persistent_water",
+          "invalid_pixels": 0,
+          "maximum": 255.0,
+          "minimum": 0.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339392
+        },
+        {
+          "description": "S1_event_composite_valid_mask",
+          "invalid_pixels": 0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339392
+        }
+      ],
+      "band_count": 9,
+      "band_descriptions": [
+        "valid_depth_mask",
+        "flood_mask",
+        "unknown_mask",
+        "permanent_water_mask",
+        "extreme_high_mask",
+        "DEM_valid_mask",
+        "slope_valid_mask",
+        "persistent_water",
+        "S1_event_composite_valid_mask"
+      ],
+      "crs": "EPSG:27704",
+      "dtypes": [
+        "uint8",
+        "uint8",
+        "uint8",
+        "uint8",
+        "uint8",
+        "uint8",
+        "uint8",
+        "uint8",
+        "uint8"
+      ],
+      "height": 256,
+      "nodata": null,
+      "observed_crs_counts": {
+        "EPSG:27704": 997
+      },
+      "path_column": "masks_path",
+      "resolution": [
+        20.0,
+        20.0
+      ],
+      "role": "mask_only",
+      "width": 256
+    },
+    "s1_change": {
+      "aggregate_values": [
+        {
+          "description": "VV_delta_db",
+          "invalid_pixels": 58,
+          "maximum": 47.27947998046875,
+          "minimum": -50.44482421875,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339334
+        },
+        {
+          "description": "VH_delta_db",
+          "invalid_pixels": 58,
+          "maximum": 39.409332275390625,
+          "minimum": -50.247589111328125,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339334
+        },
+        {
+          "description": "anomaly_raw",
+          "invalid_pixels": 58,
+          "maximum": 40.24494171142578,
+          "minimum": 0.01841691881418228,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339334
+        },
+        {
+          "description": "anomaly_selection",
+          "invalid_pixels": 58,
+          "maximum": 38.8963623046875,
+          "minimum": 0.4247436225414276,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339334
+        }
+      ],
+      "band_count": 4,
+      "band_descriptions": [
+        "VV_delta_db",
+        "VH_delta_db",
+        "anomaly_raw",
+        "anomaly_selection"
+      ],
+      "crs": "EPSG:27704",
+      "dtypes": [
+        "float32",
+        "float32",
+        "float32",
+        "float32"
+      ],
+      "height": 256,
+      "nodata": -9999.0,
+      "observed_crs_counts": {
+        "EPSG:27704": 997
+      },
+      "path_column": "s1_change_path",
+      "resolution": [
+        20.0,
+        20.0
+      ],
+      "role": "model_input",
+      "width": 256
+    },
+    "s1_qa": {
+      "aggregate_values": [
+        {
+          "description": "event_observation_count",
+          "invalid_pixels": 90,
+          "maximum": 179.0,
+          "minimum": 1.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339302
+        },
+        {
+          "description": "selected_pre_observation_count",
+          "invalid_pixels": 90,
+          "maximum": 44.0,
+          "minimum": 1.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339302
+        },
+        {
+          "description": "selected_event_day_offset",
+          "invalid_pixels": 90,
+          "maximum": 111.63137817382812,
+          "minimum": 0.11380787193775177,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339302
+        },
+        {
+          "description": "selected_relative_orbit",
+          "invalid_pixels": 90,
+          "maximum": 175.0,
+          "minimum": 1.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339302
+        },
+        {
+          "description": "selected_orbit_pass_code",
+          "invalid_pixels": 90,
+          "maximum": 1.0,
+          "minimum": -1.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339302
+        }
+      ],
+      "band_count": 5,
+      "band_descriptions": [
+        "event_observation_count",
+        "selected_pre_observation_count",
+        "selected_event_day_offset",
+        "selected_relative_orbit",
+        "selected_orbit_pass_code"
+      ],
+      "crs": "EPSG:27704",
+      "dtypes": [
+        "float32",
+        "float32",
+        "float32",
+        "float32",
+        "float32"
+      ],
+      "height": 256,
+      "nodata": -9999.0,
+      "observed_crs_counts": {
+        "EPSG:27704": 997
+      },
+      "path_column": "s1_qa_path",
+      "resolution": [
+        20.0,
+        20.0
+      ],
+      "role": "quality_only",
+      "width": 256
+    },
+    "s1_t1": {
+      "aggregate_values": [
+        {
+          "description": "VV_pre_db",
+          "invalid_pixels": 58,
+          "maximum": 30.09068489074707,
+          "minimum": -50.06392288208008,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339334
+        },
+        {
+          "description": "VH_pre_db",
+          "invalid_pixels": 58,
+          "maximum": 23.51072883605957,
+          "minimum": -64.93785858154297,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339334
+        },
+        {
+          "description": "angle_pre_deg",
+          "invalid_pixels": 58,
+          "maximum": 46.17546081542969,
+          "minimum": 29.843212127685547,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339334
+        }
+      ],
+      "band_count": 3,
+      "band_descriptions": [
+        "VV_pre_db",
+        "VH_pre_db",
+        "angle_pre_deg"
+      ],
+      "crs": "EPSG:27704",
+      "dtypes": [
+        "float32",
+        "float32",
+        "float32"
+      ],
+      "height": 256,
+      "nodata": -9999.0,
+      "observed_crs_counts": {
+        "EPSG:27704": 997
+      },
+      "path_column": "s1_t1_path",
+      "resolution": [
+        20.0,
+        20.0
+      ],
+      "role": "model_input",
+      "width": 256
+    },
+    "s1_t2": {
+      "aggregate_values": [
+        {
+          "description": "VV_event_db",
+          "invalid_pixels": 58,
+          "maximum": 30.26036834716797,
+          "minimum": -60.305599212646484,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339334
+        },
+        {
+          "description": "VH_event_db",
+          "invalid_pixels": 58,
+          "maximum": 22.859220504760742,
+          "minimum": -82.7967529296875,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339334
+        },
+        {
+          "description": "angle_event_deg",
+          "invalid_pixels": 58,
+          "maximum": 46.25733184814453,
+          "minimum": 29.844453811645508,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 65339334
+        }
+      ],
+      "band_count": 3,
+      "band_descriptions": [
+        "VV_event_db",
+        "VH_event_db",
+        "angle_event_deg"
+      ],
+      "crs": "EPSG:27704",
+      "dtypes": [
+        "float32",
+        "float32",
+        "float32"
+      ],
+      "height": 256,
+      "nodata": -9999.0,
+      "observed_crs_counts": {
+        "EPSG:27704": 997
+      },
+      "path_column": "s1_t2_path",
+      "resolution": [
+        20.0,
+        20.0
+      ],
+      "role": "model_input",
+      "width": 256
+    },
+    "terrain": {
+      "aggregate_values": [
+        {
+          "description": "elevation_m_DSM",
+          "invalid_pixels": 894226,
+          "maximum": 2410.783447265625,
+          "minimum": -31.91558837890625,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 64445166
+        },
+        {
+          "description": "slope_deg",
+          "invalid_pixels": 894226,
+          "maximum": 77.78141021728516,
+          "minimum": 0.0,
+          "nonfinite_pixels": 0,
+          "valid_pixels": 64445166
+        }
+      ],
+      "band_count": 2,
+      "band_descriptions": [
+        "elevation_m_DSM",
+        "slope_deg"
+      ],
+      "crs": "EPSG:27704",
+      "dtypes": [
+        "float32",
+        "float32"
+      ],
+      "height": 256,
+      "nodata": -9999.0,
+      "observed_crs_counts": {
+        "EPSG:27704": 997
+      },
+      "path_column": "dem_path",
+      "resolution": [
+        20.0,
+        20.0
+      ],
+      "role": "model_input",
+      "width": 256
+    }
+  },
+  "sample_counts": {
+    "test": 83,
+    "train": 825,
+    "val": 89
+  },
+  "status": "ready"
+}

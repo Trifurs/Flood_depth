@@ -1,4 +1,4 @@
-"""Small, train-only task-adaptive depth objective for v13.2."""
+"""Train-only task-adaptive depth objective."""
 
 from __future__ import annotations
 

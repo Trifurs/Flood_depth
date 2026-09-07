@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import torch
 import torch.nn.functional as F
 
-from models.terrain_graph_kan import DIRECTIONS, _roll_with_boundary_mask
+from models.graph_utils import DIRECTIONS, _roll_with_boundary_mask
 
 
 # One representative direction from each undirected neighbour pair.  This avoids
@@ -47,8 +47,8 @@ def reference_gated_wse_gradient_loss(
     smoothed DSM step is small, while asynchronous sensor pairs receive less weight.
     Unlike an unconditional zero-curvature penalty, this term preserves non-zero
     reference water-surface gradients and avoids flattening every DSM-positive region.
-    Aggregation can be pair-micro for deployment-aligned training or event-macro for
-    frozen legacy experiments.
+    Aggregation can be pair-micro for deployment-aligned training or event-macro
+    for event-balanced reporting.
     """
 
     for name, value in (
@@ -425,12 +425,10 @@ def weak_physics_pair_loss(
     constant WSE or downhill flow direction.
 
     ``barrier_consistency`` only discourages an excessive depth jump across an
-    S1-compatible, low-complexity, low-barrier pair. ``wse_consistency`` (the
-    V15.3 Physics-C route) applies a tolerant upper bound to reconstructed WSE
-    differences on low-barrier, low-complexity S1-compatible pairs. DSM
-    structures are used as a barrier proxy rather than being misrepresented as
-    a DTM or hydraulic model.
-    Both modes use only S1 and terrain inputs; no optical modality is accepted.
+    S1-compatible, low-complexity, low-barrier pair. ``wse_consistency`` applies
+    a tolerant upper bound to reconstructed WSE differences on low-barrier,
+    low-complexity S1-compatible pairs. DSM structures are used as a barrier
+    proxy rather than being misrepresented as a DTM or hydraulic model.
     """
 
     supported_modes = {

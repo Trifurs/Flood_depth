@@ -45,9 +45,8 @@ class ModelEMA:
     def reset_from_model(self, model: torch.nn.Module) -> None:
         """Make EMA exactly match already-loaded raw model weights.
 
-        This is required when a legacy checkpoint has no EMA payload: keeping the
-        shadow initialized before checkpoint loading would evaluate unrelated,
-        random parameters as "EMA" weights.
+        This is required when a checkpoint has no EMA payload: keeping the shadow
+        initialized before checkpoint loading would evaluate unrelated parameters.
         """
 
         unwrapped = model.module if hasattr(model, "module") else model
@@ -75,8 +74,7 @@ def restore_ema_after_checkpoint_load(
 ) -> bool:
     """Restore saved EMA, or safely initialize it from loaded raw weights.
 
-    Returns ``True`` when an EMA payload was restored and ``False`` for the
-    legacy raw-model fallback.
+    Returns ``True`` when an EMA payload was restored and ``False`` otherwise.
     """
 
     if ema is None:

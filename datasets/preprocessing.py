@@ -9,26 +9,10 @@ from typing import Any, Mapping
 import numpy as np
 
 from datasets.contract import DatasetContract, sha256_file
-from datasets.reliability_spec import ReliabilitySpec
+from datasets.reliability_spec import RELIABILITY_NAMES, ReliabilitySpec
 
 
-RELIABILITY_NAMES = (
-    "s1_event_observation_count_z",
-    "s1_event_day_z",
-    "s2_pre_clear_observation_count_z",
-    "s2_event_clear_observation_count_z",
-    "s2_event_day_z",
-    "s1_valid",
-    "s2_valid",
-    "dem_valid",
-    "event_duration_log_scaled",
-    "absolute_normalized_sensor_day_difference",
-    "s1_day_missing",
-    "s2_day_missing",
-)
-
-
-def reliability_spec_for_mode(input_mode: str = "s1_s2_terrain") -> ReliabilitySpec:
+def reliability_spec_for_mode(input_mode: str = "s1_terrain") -> ReliabilitySpec:
     """Resolve the named reliability schema without positional assumptions."""
 
     return ReliabilitySpec.from_mode(input_mode)

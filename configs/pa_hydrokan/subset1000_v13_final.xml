@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<config>
-  <include path="subset1000_v13_corrected.xml" />
-  <run_name type="str">pa_hydrokan_subset1000_hydrov13_final</run_name>
-  <!-- Independent from the candidate run; selection is already fixed by val. -->
-  <training><epochs type="int">25</epochs><minimum_epochs type="int">20</minimum_epochs><early_stop_patience type="int">10</early_stop_patience></training>
-</config>
