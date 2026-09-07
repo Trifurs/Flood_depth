@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train a registered flood-depth model with strict reproducibility."""
+"""Train PA-HydroKAN with strict reproducibility."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ from datasets.transforms import SynchronousAugment
 from datasets.train_depth_calibration import collect_canonical_train_depths
 from losses.composite_loss import CompositeFloodDepthLoss
 from losses.frozen_soft_depth_balance import FrozenSoftDepthBalance
-from tools.evaluate import dataset_fingerprint, embed_source_fingerprints, evaluate_loader
+from tools.evaluate_pa_hydrokan import dataset_fingerprint, embed_source_fingerprints, evaluate_loader
 from utils.checkpoint import (
     checkpoint_depth_output_semantics,
     load_checkpoint,
@@ -861,11 +861,6 @@ def run_training(args: argparse.Namespace) -> Path:
             frozen_depth_balance.train_weight_max,
         )
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
-    prior_config = config["dataset"]["positive_prior"]
-    prior = normalizer.positive_prior if prior_config["mode"] == "auto" else float(prior_config["value"])
-    minimum, maximum = float(prior_config["minimum"]), float(prior_config["maximum"])
-    prior = float(np.clip(prior, minimum, maximum))
-    LOGGER.info("nnPU positive prior=%f method=%s", prior, prior_config["mode"])
     LOGGER.info("train-only depth stratification edges (m)=%s", depth_bins)
 
     amp_enabled, amp_dtype, scaler_enabled = resolve_amp(
@@ -932,7 +927,7 @@ def run_training(args: argparse.Namespace) -> Path:
         int(config["training"].get("ema_warmup_steps", 0)),
     ) if bool(config["training"].get("ema_enabled", False)) else None
     criterion = CompositeFloodDepthLoss(
-        config["loss"], prior, depth_bins, normalizer.train_depth_bins,
+        config["loss"], depth_bins, normalizer.train_depth_bins,
         normalizer.train_depth_bin_counts, frozen_depth_balance,
     )
     fingerprint = dataset_fingerprint(config)
@@ -1040,7 +1035,6 @@ def run_training(args: argparse.Namespace) -> Path:
                 "name": str(config["model"]["name"]),
                 "total_parameters": total_parameters,
                 "trainable_parameters": trainable_parameters,
-                "positive_prior": prior,
                 "depth_output_semantics": config["model"].get(
                     "depth_output_semantics", "conditional_positive"
                 ),
@@ -1112,7 +1106,6 @@ def run_training(args: argparse.Namespace) -> Path:
                             fingerprint,
                             extra={
                                 "total_parameters": total_parameters,
-                                "positive_prior": prior,
                                 "best_metric_name": monitor,
                                 "depth_stratification_edges_m": depth_bins,
                                 "primary_depth_stratification_edges_m": normalizer.train_depth_bins,
@@ -1214,7 +1207,6 @@ def run_training(args: argparse.Namespace) -> Path:
                     dataset_fingerprint=fingerprint,
                     extra={
                         "total_parameters": total_parameters,
-                        "positive_prior": prior,
                         "best_metric_name": monitor,
                         "depth_stratification_edges_m": depth_bins,
                         "primary_depth_stratification_edges_m": normalizer.train_depth_bins,

@@ -1,4 +1,8 @@
-# Model
+# PA-HydroKAN model
+
+The production identifier is `pa_hydrokan`. It is the reference depth model for
+all comparisons; model parameter counts and exact comparison settings are emitted
+by `tools/report_model_inventory.py`.
 
 The model uses a radar-first information flow:
 

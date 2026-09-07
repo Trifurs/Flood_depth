@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from tools.evaluate import dataset_fingerprint
+from tools.evaluate_pa_hydrokan import dataset_fingerprint
 from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import jsonable_config
 from utils.registry import build_model

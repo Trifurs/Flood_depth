@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate the production model with partial-positive metrics."""
+"""Evaluate PA-HydroKAN with partial-positive metrics."""
 
 from __future__ import annotations
 
@@ -174,7 +174,6 @@ def evaluate_loader(
     loss_values: list[float] = []
     component_values: dict[str, list[float]] = {}
     event_depth_scales: list[float] = []
-    support_branch_seen = False
     mask_totals = {
         "valid_depth_mask_pixels": 0,
         "output_valid_pixels": 0,
@@ -217,20 +216,7 @@ def evaluate_loader(
                 .cpu()
                 .numpy()
             )
-            support_weighted_depth = (
-                outputs.get("expected_depth", outputs["depth"])[sample_index]
-                .detach()
-                .float()
-                .cpu()
-                .numpy()
-            )
             scale = outputs["uncertainty_scale"][sample_index].detach().float().cpu().numpy()
-            support_tensor = outputs.get("support_probability")
-            support_branch_seen = support_branch_seen or support_tensor is not None
-            support = (
-                support_tensor[sample_index].detach().float().cpu().numpy()
-                if support_tensor is not None else None
-            )
             target = batch["label"][sample_index].detach().float().cpu().numpy()
             positive_mask = (
                 batch["masks"]["valid_depth_mask"][sample_index].detach().cpu().numpy() > 0.5
@@ -277,7 +263,6 @@ def evaluate_loader(
                 target,
                 scale,
                 metric_valid_mask,
-                support,
                 sensor_day,
                 observation,
             )
@@ -363,23 +348,6 @@ def evaluate_loader(
                     valid_mask=output_valid,
                     descriptions=["conditional_depth_m"],
                 )
-                if support is not None:
-                    write_geotiff(
-                        sample_dir / "support_weighted_depth_m.tif",
-                        support_weighted_depth,
-                        crs=crs,
-                        transform=transform,
-                        valid_mask=output_valid,
-                        descriptions=["support_weighted_depth_m"],
-                    )
-                    write_geotiff(
-                        sample_dir / "support_probability.tif",
-                        support,
-                        crs=crs,
-                        transform=transform,
-                        valid_mask=output_valid,
-                        descriptions=["support_probability"],
-                    )
                 write_geotiff(
                     sample_dir / "uncertainty_scale_m.tif",
                     scale,
@@ -417,7 +385,6 @@ def evaluate_loader(
         float(mask_totals["positive_excluded_by_output_valid_pixels"])
         / max(float(mask_totals["valid_depth_mask_pixels"]), 1.0)
     )
-    summary["support_probability_reported"] = support_branch_seen
     graph_identity = runtime_graph_identity(unwrapped)
     if graph_identity is not None:
         summary["graph_identity"] = graph_identity
@@ -444,8 +411,13 @@ def run_evaluation(
     max_batches: int | None = None,
     weights: str = "raw",
     validity_mask: str | None = None,
+    num_workers: int | None = None,
 ) -> dict[str, Any]:
     config = embed_source_fingerprints(load_config(config_path))
+    if num_workers is not None:
+        if num_workers < 0:
+            raise ValueError("num_workers must be non-negative")
+        config["training"]["num_workers"] = int(num_workers)
     if split not in {"val", "test"}:
         raise ValueError("Evaluation split must be val or test")
     if device_name == "auto":
@@ -488,10 +460,8 @@ def run_evaluation(
     checkpoint_epoch = int(checkpoint.get("epoch", 0))
     normalizer = RobustNormalizer(Path(config["dataset"]["train_stats"]), dataset.contract)
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
-    prior_config = config["dataset"]["positive_prior"]
-    prior = normalizer.positive_prior if prior_config["mode"] == "auto" else float(prior_config["value"])
     criterion = CompositeFloodDepthLoss(
-        config["loss"], prior, depth_bins, normalizer.train_depth_bins,
+        config["loss"], depth_bins, normalizer.train_depth_bins,
         normalizer.train_depth_bin_counts,
         frozen_depth_balance_for_config(config),
     )
@@ -537,6 +507,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--max-batches", type=int)
     parser.add_argument("--weights", choices=("raw", "ema"), default="raw")
+    parser.add_argument("--num-workers", type=int)
     parser.add_argument(
         "--validity-mask",
         choices=(CANONICAL_POSITIVE_MASK, "output_valid", "common_s1", "s1_event_support"),
@@ -558,6 +529,7 @@ def main() -> int:
         args.max_batches,
         args.weights,
         args.validity_mask,
+        args.num_workers,
     )
     print(summary)
     return 0

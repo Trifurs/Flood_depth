@@ -1,6 +1,6 @@
 <config>
   <dataset>
-    <name type="str">flood_depth_s1</name>
+    <name type="str">subset1000_s1_terrain</name>
     <root type="path">/home/whu/桌面/myData/Flood_depth/subset1000</root>
     <contract type="path">assets/dataset_contract.json</contract>
     <manifest type="path">/home/whu/桌面/myData/Flood_depth/subset1000/metadata/training_manifest.csv</manifest>
@@ -30,12 +30,6 @@
       <feature_dropout_probability type="float">0.0</feature_dropout_probability>
       <sensor_missing_simulation_probability type="float">0.0</sensor_missing_simulation_probability>
     </augmentation>
-    <positive_prior>
-      <mode type="str">auto</mode>
-      <value type="float">0.1</value>
-      <minimum type="float">0.01</minimum>
-      <maximum type="float">0.5</maximum>
-    </positive_prior>
     <model_bands>
       <s1_t1 type="list"><item>VV_pre_db</item><item>VH_pre_db</item></s1_t1>
       <s1_t2 type="list"><item>VV_event_db</item><item>VH_event_db</item></s1_t2>

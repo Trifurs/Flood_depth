@@ -1,0 +1,4 @@
+<config>
+  <!-- Stable default entry point for the production PA-HydroKAN configuration. -->
+  <include path="pa_hydrokan.xml" />
+</config>

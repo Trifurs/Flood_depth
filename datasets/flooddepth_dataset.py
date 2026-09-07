@@ -26,8 +26,12 @@ class DatasetIntegrityError(RuntimeError):
 class FloodDepthDataset(Dataset[dict[str, Any]]):
     """Return structured modalities, targets, masks, validity, and provenance.
 
-    Label-derived masks are returned solely for loss/evaluation and are never part
-    of model inputs. Invalid target values are filled with zero for tensor safety.
+    Label-derived masks are returned for supervision and evaluation.  The
+    production PA-HydroKAN input adapter never consumes them.  A separately
+    documented comparison adapter may consume ``valid_depth_mask`` as the
+    user-supplied flood-range oracle; it is intentionally isolated from this
+    production input path. Invalid target values are filled with zero for tensor
+    safety.
     """
 
     def __init__(

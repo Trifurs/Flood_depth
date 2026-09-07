@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Infer one audited sample selected by sample ID or any of its raster paths."""
+"""Run PA-HydroKAN inference for one audited sample."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from datasets.band_selection import resolve_band_spec
 from datasets.contract import DatasetContract
 from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
 from losses.composite_loss import CompositeFloodDepthLoss
-from tools.evaluate import (
+from tools.evaluate_pa_hydrokan import (
     dataset_fingerprint,
     embed_source_fingerprints,
     evaluate_loader,
@@ -96,11 +96,8 @@ def main() -> int:
     loader = DataLoader(Subset(dataset, [index]), batch_size=1, shuffle=False)
     normalizer = RobustNormalizer(Path(config["dataset"]["train_stats"]), dataset.contract)
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
-    prior_cfg = config["dataset"]["positive_prior"]
-    prior = normalizer.positive_prior if prior_cfg["mode"] == "auto" else float(prior_cfg["value"])
     criterion = CompositeFloodDepthLoss(
         config["loss"],
-        prior,
         depth_bins,
         normalizer.train_depth_bins,
         normalizer.train_depth_bin_counts,

@@ -1,5 +1,10 @@
-"""Production flood-depth model."""
+"""Production PA-HydroKAN model."""
 
-from .flood_depth_model import FloodDepthModel, build_flood_depth_model
+from .pa_hydrokan import PAHydroKAN, build_pa_hydrokan
+from .comparison_factory import build_comparison_model
 
-__all__ = ["FloodDepthModel", "build_flood_depth_model"]
+__all__ = [
+    "PAHydroKAN",
+    "build_pa_hydrokan",
+    "build_comparison_model",
+]

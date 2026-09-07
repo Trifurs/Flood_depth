@@ -4,7 +4,7 @@ from datasets.band_selection import resolve_band_spec
 from datasets.contract import DatasetContract
 from datasets.flooddepth_dataset import FloodDepthDataset
 from datasets.model_input_spec import ModelInputSpec
-from tools.train import apply_train_only_calibration, prepare_train_only_calibration
+from tools.train_pa_hydrokan import apply_train_only_calibration, prepare_train_only_calibration
 
 
 def test_train_calibration_builds_a_frozen_weight_curve(production_config) -> None:

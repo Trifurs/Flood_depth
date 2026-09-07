@@ -1,0 +1,53 @@
+%0 Journal Article
+%T Breaking Limits of Remote Sensing by Deep Learning From Simulated Data for Flood and Debris-Flow Mapping
+%D 2020
+%R 10.1109/TGRS.2020.3035469
+%U https://doi.org/10.1109/TGRS.2020.3035469
+%Z Source role: direct method and architecture for DLSIM Attention U-Net and LinkNet; official code: https://github.com/nyokoya/dlsim
+
+%0 Journal Article
+%T Geospatial and Deep Learning Approaches for Modeling Floodwater Depth in Urbanized Areas
+%D 2026
+%J Remote Sensing
+%V 18
+%P 60
+%R 10.3390/rs18010060
+%U https://doi.org/10.3390/rs18010060
+%Z Source role: direct flood-depth task reference for ResNet comparator; task context only for local U-Net and Swin candidate.
+
+%0 Electronic Source
+%T segmentation_models.pytorch
+%U https://github.com/qubvel-org/segmentation_models.pytorch
+%Z Source role: public U-Net and U-Net++ architecture implementation reference; local dependency-free implementations are used for repeatability.
+
+%0 Journal Article
+%T Inundation2Depth: A multi-source dataset for flood inundation depth estimation
+%D 2025
+%J Data in Brief
+%R 10.1016/j.dib.2025.112347
+%U https://doi.org/10.1016/j.dib.2025.112347
+%Z Source role: inundation/depth data context only for the U-Net++ comparator; not a claimed U-Net++ experiment source.
+
+%0 Journal Article
+%T Flood depth mapping with SWOT-derived training data: evaluating the potential of open-source datasets
+%D 2026
+%J Journal of Hydrology
+%V 677
+%P 136000
+%R 10.1016/j.jhydrol.2026.136000
+%U https://doi.org/10.1016/j.jhydrol.2026.136000
+%Z Source role: deferred SWOT attention candidate; no official training code and insufficient public layer-level specification for audited reproduction.
+
+%0 Journal Article
+%T U-FLOOD: Topographic deep learning for predicting urban pluvial flood water depth
+%D 2021
+%J Journal of Hydrology
+%R 10.1016/j.jhydrol.2021.126898
+%U https://doi.org/10.1016/j.jhydrol.2021.126898
+%Z Source role: deferred pluvial-simulation candidate; official archive: https://data.dtu.dk/articles/code/U-FLOOD_-_computer_code_and_data_associated_with_the_article_U-FLOOD_topographic_deep_learning_for_predicting_urban_pluvial_flood_water_depth_/14206838
+
+%0 Electronic Source
+%T Swin-Unet: Unet-like Pure Transformer for Medical Image Segmentation
+%D 2022
+%U https://github.com/HuCaoFighting/Swin-Unet
+%Z Source role: deferred candidate; the public repository is for medical image segmentation rather than flood-depth regression.

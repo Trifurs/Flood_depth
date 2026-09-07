@@ -1,9 +1,9 @@
 <config>
   <include path="base.xml" />
-  <include path="datasets/flood_depth.xml" />
-  <run_name type="str">flood_depth_s1</run_name>
+  <include path="datasets/subset1000_s1_terrain.xml" />
+  <run_name type="str">pa_hydrokan</run_name>
   <model>
-    <name type="str">flood_depth_s1</name>
+    <name type="str">pa_hydrokan</name>
     <channels type="list" item_type="int"><item>32</item><item>64</item><item>128</item><item>192</item></channels>
     <residual_block type="str">efficient</residual_block>
     <dropout type="float">0.10</dropout>
@@ -48,7 +48,6 @@
     <depth_underprediction_factor type="float">1.0</depth_underprediction_factor>
     <depth_underprediction_min_m type="float">0.50</depth_underprediction_min_m>
     <tail_underprediction_alpha type="float">0.0</tail_underprediction_alpha>
-    <lambda_pu type="float">0.0</lambda_pu>
     <lambda_gradient type="float">0.0</lambda_gradient>
     <lambda_auxiliary type="float">0.04</lambda_auxiliary>
     <auxiliary_start_epoch type="int">0</auxiliary_start_epoch>
@@ -95,6 +94,5 @@
     <frozen_depth_weights_artifact type="path">assets/frozen_depth_weights.json</frozen_depth_weights_artifact>
     <schedule_total_epochs type="int">100</schedule_total_epochs>
     <auxiliary_decay type="str">constant</auxiliary_decay>
-    <support_weighted_supervision type="bool">false</support_weighted_supervision>
   </loss>
 </config>

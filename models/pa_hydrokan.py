@@ -1,4 +1,4 @@
-"""Production SAR-only flood-depth model."""
+"""Production PA-HydroKAN SAR-and-terrain model."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def _logit(value: float) -> float:
     return float(torch.logit(torch.tensor(bounded)))
 
 
-class FloodDepthHeads(nn.Module):
+class PAHydroKANHeads(nn.Module):
     """Predict conditional positive depth and a detached uncertainty scale."""
 
     def __init__(
@@ -100,8 +100,8 @@ class FloodDepthHeads(nn.Module):
         self.depth_output_semantics = value
 
 
-class FloodDepthModel(nn.Module):
-    """SAR-first, terrain-aware model for flood-depth estimation."""
+class PAHydroKAN(nn.Module):
+    """PA-HydroKAN: SAR-first, terrain-aware conditional-depth estimator."""
 
     def __init__(
         self,
@@ -112,13 +112,13 @@ class FloodDepthModel(nn.Module):
     ) -> None:
         super().__init__()
         if not input_spec.is_s1_only:
-            raise ValueError("FloodDepthModel requires the S1-only input contract")
+            raise ValueError("PAHydroKAN requires the S1-only input contract")
         self.input_spec = input_spec
         self.reliability_spec = ReliabilitySpec.from_mode(input_spec.mode)
         self.band_spec = band_spec
         channels = [int(value) for value in model_config["channels"]]
         if len(channels) != 4 or any(value <= 0 for value in channels):
-            raise ValueError("FloodDepthModel requires four positive encoder scales")
+            raise ValueError("PAHydroKAN requires four positive encoder scales")
         dropout = float(model_config["dropout"])
         groups = int(model_config["group_norm_groups"])
         block_kind = str(model_config["residual_block"])
@@ -157,7 +157,7 @@ class FloodDepthModel(nn.Module):
         self.context = HydrologyContext(channels[-1], groups, dropout=0.05)
         graph_stride = int(model_config["graph_feature_stride"])
         if graph_stride != 8:
-            raise ValueError("FloodDepthModel applies graph reasoning at encoder stride 8")
+            raise ValueError("PAHydroKAN applies graph reasoning at encoder stride 8")
         self.graph = HydroEdgeKAN(
             channels[-1],
             heads=int(model_config["graph_heads"]),
@@ -182,7 +182,7 @@ class FloodDepthModel(nn.Module):
             int(model_config["auxiliary_count"]),
             int(model_config.get("auxiliary_stage", 0)),
         )
-        self.heads = FloodDepthHeads(
+        self.heads = PAHydroKANHeads(
             widths[-1],
             groups,
             epsilon=float(model_config["uncertainty_epsilon"]),
@@ -259,8 +259,8 @@ class FloodDepthModel(nn.Module):
         return outputs
 
 
-def build_flood_depth_model(config: Mapping[str, Any]) -> FloodDepthModel:
-    """Build the sole production model from a resolved configuration."""
+def build_pa_hydrokan(config: Mapping[str, Any]) -> PAHydroKAN:
+    """Build PA-HydroKAN from a resolved configuration."""
 
     if "model" not in config:
         raise ValueError("A resolved model configuration is required")
@@ -270,4 +270,5 @@ def build_flood_depth_model(config: Mapping[str, Any]) -> FloodDepthModel:
     contract = DatasetContract.load(config["dataset"]["contract"])
     band_spec = resolve_band_spec(config, contract)
     raw_names = tuple(str(value) for value in contract.group("terrain")["band_descriptions"])
-    return FloodDepthModel(config["model"], band_spec, raw_names, input_spec)
+    return PAHydroKAN(config["model"], band_spec, raw_names, input_spec)
+

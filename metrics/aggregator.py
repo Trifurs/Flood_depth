@@ -40,7 +40,6 @@ class EvaluationAggregator:
         target: np.ndarray,
         scale: np.ndarray,
         valid_mask: np.ndarray,
-        support_probability: np.ndarray | None = None,
         day_difference: np.ndarray | None = None,
         observation_feature: np.ndarray | None = None,
     ) -> dict[str, Any]:
@@ -50,12 +49,6 @@ class EvaluationAggregator:
         scale_flat = np.asarray(scale).reshape(-1)[mask]
         metrics = depth_metrics(prediction_flat, target_flat)
         row: dict[str, Any] = {"sample_id": sample_id, "source_event_id": event_id, **metrics}
-        if support_probability is not None:
-            support = np.asarray(support_probability).reshape(-1)
-            row["known_positive_support_recall_at_0.5"] = float(
-                np.mean(support[mask] >= 0.5)
-            ) if np.any(mask) else float("nan")
-            row["predicted_support_area_fraction"] = float(np.mean(support >= 0.5))
         if day_difference is not None:
             day = np.asarray(day_difference).reshape(-1)
             row["mean_sensor_day_difference"] = float(np.mean(day[mask])) if np.any(mask) else float("nan")

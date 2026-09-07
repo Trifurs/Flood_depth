@@ -1,4 +1,4 @@
-"""Partial-label depth, nnPU, uncertainty, and weak-physics losses."""
+"""Partial-label depth, uncertainty, and weak-physics losses."""
 
 from .composite_loss import CompositeFloodDepthLoss
 

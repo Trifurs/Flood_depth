@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 @pytest.fixture
 def production_config():
-    from tools.evaluate import embed_source_fingerprints
+    from tools.evaluate_pa_hydrokan import embed_source_fingerprints
     from utils.config import load_config
 
     return embed_source_fingerprints(load_config(ROOT / "configs" / "config.xml"))

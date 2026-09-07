@@ -84,10 +84,6 @@ class RobustNormalizer:
         return self._apply(transformed, valid, entry)
 
     @property
-    def positive_prior(self) -> float:
-        return float(self.stats["positive_prior"]["value"])
-
-    @property
     def train_depth_bins(self) -> list[float]:
         return [float(value) for value in self.stats["train_depth"]["stratification_bin_edges"]]
 
