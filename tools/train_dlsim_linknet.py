@@ -10,4 +10,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from tools._neural_regression import train_main
 
 if __name__ == "__main__":
-    raise SystemExit(train_main("dlsim_linknet", "configs/dlsim_linknet.xml"))
+    raise SystemExit(
+        train_main(
+            "dlsim_linknet",
+            "configs/compare/deep_learning/dlsim_linknet.xml",
+        )
+    )

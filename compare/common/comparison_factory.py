@@ -6,11 +6,13 @@ from collections.abc import Callable, Mapping
 
 from torch import nn
 
-from models.dlsim_attention_unet import build_dlsim_attention_unet
-from models.dlsim_linknet import build_dlsim_linknet
-from models.resnet18_depth_regression import build_resnet18_depth_regression
-from models.unet_depth_regression import build_unet_depth_regression
-from models.unetplusplus_depth_regression import build_unetplusplus_depth_regression
+from compare.deep_learning.dlsim_attention_unet import build_dlsim_attention_unet
+from compare.deep_learning.dlsim_linknet import build_dlsim_linknet
+from compare.deep_learning.resnet18_depth_regression import build_resnet18_depth_regression
+from compare.deep_learning.unet_depth_regression import build_unet_depth_regression
+from compare.deep_learning.unetplusplus_depth_regression import (
+    build_unetplusplus_depth_regression,
+)
 
 
 BUILDERS: dict[str, Callable[[Mapping[str, object]], nn.Module]] = {

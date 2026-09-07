@@ -1,4 +1,4 @@
-"""DLSIM-inspired Attention U-Net comparator for conditional flood depth."""
+"""Plain U-Net flood-depth regression comparator."""
 
 from __future__ import annotations
 
@@ -7,8 +7,7 @@ from collections.abc import Mapping
 import torch
 from torch import nn
 
-from models._depth_regression import (
-    AttentionGate,
+from compare.common._depth_regression import (
     DoubleConv,
     DownBlock,
     UpBlock,
@@ -18,8 +17,8 @@ from models._depth_regression import (
 )
 
 
-class DLSIMAttentionUNet(nn.Module):
-    """Attention U-Net adaptation of the DLSIM water-level regression branch."""
+class UNetDepthRegression(nn.Module):
+    """A standard U-Net with a direct range-conditioned depth head."""
 
     def __init__(self, model_config: Mapping[str, object]) -> None:
         super().__init__()
@@ -30,10 +29,6 @@ class DLSIMAttentionUNet(nn.Module):
         self.down2 = DownBlock(c1, c2)
         self.down3 = DownBlock(c2, c3)
         self.bottom = DownBlock(c3, c4)
-        self.attention3 = AttentionGate(c3, c4)
-        self.attention2 = AttentionGate(c2, c3)
-        self.attention1 = AttentionGate(c1, c2)
-        self.attention0 = AttentionGate(c0, c1)
         self.up3 = UpBlock(c4, c3, c3)
         self.up2 = UpBlock(c3, c2, c2)
         self.up1 = UpBlock(c2, c1, c1)
@@ -46,12 +41,12 @@ class DLSIMAttentionUNet(nn.Module):
         x2 = self.down2(x1)
         x3 = self.down3(x2)
         x4 = self.bottom(x3)
-        d3 = self.up3(x4, self.attention3(x3, x4))
-        d2 = self.up2(d3, self.attention2(x2, d3))
-        d1 = self.up1(d2, self.attention1(x1, d2))
-        d0 = self.up0(d1, self.attention0(x0, d1))
+        d3 = self.up3(x4, x3)
+        d2 = self.up2(d3, x2)
+        d1 = self.up1(d2, x1)
+        d0 = self.up0(d1, x0)
         return self.head(d0, flood_range)
 
 
-def build_dlsim_attention_unet(config: Mapping[str, object]) -> DLSIMAttentionUNet:
-    return DLSIMAttentionUNet(config["model"])
+def build_unet_depth_regression(config: Mapping[str, object]) -> UNetDepthRegression:
+    return UNetDepthRegression(config["model"])

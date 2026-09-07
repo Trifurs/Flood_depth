@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._terrain import checked_depth, nearest_boundary_surface, validate_inputs
+from compare.common._terrain import checked_depth, nearest_boundary_surface, validate_inputs
 
 
 METHOD_NAME = "fwdet_v2"

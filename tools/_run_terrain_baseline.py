@@ -18,7 +18,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from compare import available_methods, estimator_for
+from compare.common.traditional_registry import available_methods, estimator_for
 from datasets.band_selection import resolve_band_spec
 from datasets.contract import DatasetContract
 from datasets.flooddepth_dataset import FloodDepthDataset

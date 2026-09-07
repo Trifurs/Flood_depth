@@ -16,4 +16,4 @@ def production_config():
     from tools.evaluate_pa_hydrokan import embed_source_fingerprints
     from utils.config import load_config
 
-    return embed_source_fingerprints(load_config(ROOT / "configs" / "config.xml"))
+    return embed_source_fingerprints(load_config(ROOT / "configs" / "pa_hydrokan.xml"))

@@ -12,4 +12,4 @@ from tools._run_terrain_baseline import main_for_model
 
 
 if __name__ == "__main__":
-    raise SystemExit(main_for_model("tsa", Path("configs/compare/tsa.xml")))
+    raise SystemExit(main_for_model("tsa", Path("configs/compare/traditional/tsa.xml")))

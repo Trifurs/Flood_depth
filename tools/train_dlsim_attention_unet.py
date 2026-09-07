@@ -10,4 +10,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from tools._neural_regression import train_main
 
 if __name__ == "__main__":
-    raise SystemExit(train_main("dlsim_attention_unet", "configs/dlsim_attention_unet.xml"))
+    raise SystemExit(
+        train_main(
+            "dlsim_attention_unet",
+            "configs/compare/deep_learning/dlsim_attention_unet.xml",
+        )
+    )

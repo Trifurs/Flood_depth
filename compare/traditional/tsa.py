@@ -5,7 +5,13 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage
 
-from ._terrain import EIGHT_CONNECTED, checked_depth, nearest_boundary_surface, outer_boundary, validate_inputs
+from compare.common._terrain import (
+    EIGHT_CONNECTED,
+    checked_depth,
+    nearest_boundary_surface,
+    outer_boundary,
+    validate_inputs,
+)
 
 
 METHOD_NAME = "tsa"

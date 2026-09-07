@@ -7,18 +7,21 @@ entry point. Shared loading, metric, and training code lives only in private
 helpers; it does not select or expose a model itself.
 This follows the model/configuration-family separation used by the
 [DEHCD-Net layout](https://github.com/Trifurs/DEHCD-Net).
+The `compare/common/` directory contains all shared comparison utilities and
+registries; `compare/traditional/` and `compare/deep_learning/` contain only
+the named model implementations.
 
 | Identifier | Implementation | Configuration | Executable | Inputs |
 |---|---|---|---|---|
 | `pa_hydrokan` | `models/pa_hydrokan.py` | `configs/pa_hydrokan.xml` | `tools/train_pa_hydrokan.py` | S1, QA, DSM/slope |
-| `fwdet_v2` | `compare/fwdet_v2.py` | `configs/compare/fwdet_v2.xml` | `tools/run_fwdet_v2.py` | `valid_depth_mask` + DSM |
-| `tsa` | `compare/tsa.py` | `configs/compare/tsa.xml` | `tools/run_tsa.py` | `valid_depth_mask` + DSM |
-| `fldepth` | `compare/fldepth.py` | `configs/compare/fldepth.xml` | `tools/run_fldepth.py` | `valid_depth_mask` + DSM |
-| `dlsim_attention_unet` | `models/dlsim_attention_unet.py` | `configs/dlsim_attention_unet.xml` | `tools/train_dlsim_attention_unet.py` / `tools/evaluate_dlsim_attention_unet.py` | S1 change + DSM + `valid_depth_mask` |
-| `dlsim_linknet` | `models/dlsim_linknet.py` | `configs/dlsim_linknet.xml` | `tools/train_dlsim_linknet.py` / `tools/evaluate_dlsim_linknet.py` | S1 change + DSM + `valid_depth_mask` |
-| `unet_depth_regression` | `models/unet_depth_regression.py` | `configs/unet_depth_regression.xml` | `tools/train_unet_depth_regression.py` / `tools/evaluate_unet_depth_regression.py` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
-| `resnet18_depth_regression` | `models/resnet18_depth_regression.py` | `configs/resnet18_depth_regression.xml` | `tools/train_resnet18_depth_regression.py` / `tools/evaluate_resnet18_depth_regression.py` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
-| `unetplusplus_depth_regression` | `models/unetplusplus_depth_regression.py` | `configs/unetplusplus_depth_regression.xml` | `tools/train_unetplusplus_depth_regression.py` / `tools/evaluate_unetplusplus_depth_regression.py` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
+| `fwdet_v2` | `compare/traditional/fwdet_v2.py` | `configs/compare/traditional/fwdet_v2.xml` | `tools/run_fwdet_v2.py` | `valid_depth_mask` + DSM |
+| `tsa` | `compare/traditional/tsa.py` | `configs/compare/traditional/tsa.xml` | `tools/run_tsa.py` | `valid_depth_mask` + DSM |
+| `fldepth` | `compare/traditional/fldepth.py` | `configs/compare/traditional/fldepth.xml` | `tools/run_fldepth.py` | `valid_depth_mask` + DSM |
+| `dlsim_attention_unet` | `compare/deep_learning/dlsim_attention_unet.py` | `configs/compare/deep_learning/dlsim_attention_unet.xml` | `tools/train_dlsim_attention_unet.py` / `tools/evaluate_dlsim_attention_unet.py` | S1 change + DSM + `valid_depth_mask` |
+| `dlsim_linknet` | `compare/deep_learning/dlsim_linknet.py` | `configs/compare/deep_learning/dlsim_linknet.xml` | `tools/train_dlsim_linknet.py` / `tools/evaluate_dlsim_linknet.py` | S1 change + DSM + `valid_depth_mask` |
+| `unet_depth_regression` | `compare/deep_learning/unet_depth_regression.py` | `configs/compare/deep_learning/unet_depth_regression.xml` | `tools/train_unet_depth_regression.py` / `tools/evaluate_unet_depth_regression.py` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
+| `resnet18_depth_regression` | `compare/deep_learning/resnet18_depth_regression.py` | `configs/compare/deep_learning/resnet18_depth_regression.xml` | `tools/train_resnet18_depth_regression.py` / `tools/evaluate_resnet18_depth_regression.py` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
+| `unetplusplus_depth_regression` | `compare/deep_learning/unetplusplus_depth_regression.py` | `configs/compare/deep_learning/unetplusplus_depth_regression.xml` | `tools/train_unetplusplus_depth_regression.py` / `tools/evaluate_unetplusplus_depth_regression.py` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
 
 PA-HydroKAN is a direct conditional-positive-depth regressor: it neither
 predicts nor accepts a flood-range input. Every terrain comparison model uses
@@ -37,11 +40,11 @@ conda run -n flood-depth python tools/evaluate_pa_hydrokan.py \
 
 # Evaluate each named terrain model separately.
 conda run -n flood-depth python tools/run_fwdet_v2.py \
-  --config configs/compare/fwdet_v2.xml --split val --output runs/compare/fwdet_v2/val
+  --config configs/compare/traditional/fwdet_v2.xml --split val --output runs/compare/fwdet_v2/val
 conda run -n flood-depth python tools/run_tsa.py \
-  --config configs/compare/tsa.xml --split val --output runs/compare/tsa/val
+  --config configs/compare/traditional/tsa.xml --split val --output runs/compare/tsa/val
 conda run -n flood-depth python tools/run_fldepth.py \
-  --config configs/compare/fldepth.xml --split val --output runs/compare/fldepth/val
+  --config configs/compare/traditional/fldepth.xml --split val --output runs/compare/fldepth/val
 
 # Train/evaluate one named learned comparator (repeat with its matching script).
 conda run -n flood-depth python tools/train_dlsim_attention_unet.py --device cuda

@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from models._depth_regression import comparison_input_channels
-from models.comparison_factory import build_comparison_model
+from compare.common._depth_regression import comparison_input_channels
+from compare.common.comparison_factory import build_comparison_model
 from utils.config import load_config
 
 
@@ -21,7 +21,7 @@ CONFIGS = (
 
 @pytest.mark.parametrize("filename", CONFIGS)
 def test_learned_comparison_model_is_range_conditioned(filename: str) -> None:
-    config = load_config(Path("configs") / filename)
+    config = load_config(Path("configs/compare/deep_learning") / filename)
     model = build_comparison_model(config).eval()
     channels = comparison_input_channels(config["model"]["input_schema"])
     inputs = torch.randn(1, channels, 64, 64)
@@ -39,5 +39,7 @@ def test_learned_comparison_model_is_range_conditioned(filename: str) -> None:
 def test_learned_comparison_source_record_covers_every_model() -> None:
     text = Path("docs/COMPARISON_SOURCES.md").read_text(encoding="utf-8")
     for filename in CONFIGS:
-        identifier = load_config(Path("configs") / filename)["model"]["name"]
+        identifier = load_config(
+            Path("configs/compare/deep_learning") / filename
+        )["model"]["name"]
         assert identifier in text

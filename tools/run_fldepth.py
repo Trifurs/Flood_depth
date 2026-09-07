@@ -12,4 +12,6 @@ from tools._run_terrain_baseline import main_for_model
 
 
 if __name__ == "__main__":
-    raise SystemExit(main_for_model("fldepth", Path("configs/compare/fldepth.xml")))
+    raise SystemExit(
+        main_for_model("fldepth", Path("configs/compare/traditional/fldepth.xml"))
+    )

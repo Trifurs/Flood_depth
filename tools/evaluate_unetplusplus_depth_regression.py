@@ -10,4 +10,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from tools._neural_regression import evaluation_main
 
 if __name__ == "__main__":
-    raise SystemExit(evaluation_main("unetplusplus_depth_regression", "configs/unetplusplus_depth_regression.xml"))
+    raise SystemExit(
+        evaluation_main(
+            "unetplusplus_depth_regression",
+            "configs/compare/deep_learning/unetplusplus_depth_regression.xml",
+        )
+    )

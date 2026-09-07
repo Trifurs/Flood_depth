@@ -7,7 +7,7 @@ from collections.abc import Mapping
 import torch
 from torch import nn
 
-from models._depth_regression import (
+from compare.common._depth_regression import (
     DoubleConv,
     DownBlock,
     UpBlock,

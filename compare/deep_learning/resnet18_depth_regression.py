@@ -7,7 +7,11 @@ from collections.abc import Mapping
 import torch
 from torch import nn
 
-from models._depth_regression import LinkDecoderBlock, head_from_config, validate_input_schema
+from compare.common._depth_regression import (
+    LinkDecoderBlock,
+    head_from_config,
+    validate_input_schema,
+)
 
 
 class ResNet18DepthRegression(nn.Module):

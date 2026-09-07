@@ -8,7 +8,7 @@ user-required flood-range oracle; no model predicts flood extent.
 
 The production model is **PA-HydroKAN** (`pa_hydrokan`): a SAR-first,
 terrain-aware depth estimator with an Edge-KAN terrain-connectivity prior.
-`configs/config.xml` remains its default configuration.
+`configs/pa_hydrokan.xml` is its sole model configuration.
 
 The comparison workflow is deliberately separated from the production depth
 model. Every comparison method uses `valid_depth_mask` directly as its flood
@@ -17,13 +17,18 @@ range; no flood-range prediction model is included.
 ## Layout
 
 - `configs/pa_hydrokan.xml` — PA-HydroKAN training and inference configuration.
-- `configs/config.xml` — stable default entry point for PA-HydroKAN.
-- `configs/compare/` — comparison-family configurations.
-- `configs/*_regression.xml`, `configs/dlsim_*.xml` — one configuration for each
-  learned comparison model.
+- `configs/base/` — common runtime and dataset configuration fragments.
+- `configs/compare/traditional/` — one configuration for each traditional
+  comparison model.
+- `configs/compare/deep_learning/` — one configuration for each learned
+  comparison model.
 - `assets/` — audited dataset contract and train-only normalization statistics.
-- `models/` — SAR encoder, terrain features, Edge-KAN graph, decoder, and heads.
-- `compare/` — reproducible, non-learned flood-depth comparison methods.
+- `models/` — PA-HydroKAN only: SAR encoder, terrain features, Edge-KAN graph,
+  decoder, and heads.
+- `compare/common/` — shared comparison blocks, terrain primitives, registries,
+  and factories.
+- `compare/traditional/` — reproducible non-learned comparison methods.
+- `compare/deep_learning/` — reproducible learned comparison methods.
 - `tools/` — training, evaluation, inference, and comparison runners.
 - `runs/` — locally generated training outputs; ignored by Git.
 
@@ -35,7 +40,7 @@ remaining packages:
 ```bash
 pip install -r requirements.txt
 conda run -n flood-depth python tools/train_pa_hydrokan.py \
-  --config configs/config.xml \
+  --config configs/pa_hydrokan.xml \
   --device cuda
 ```
 
@@ -47,7 +52,7 @@ EMA checkpoints, metrics, and runtime metadata.
 
 ```bash
 conda run -n flood-depth python tools/evaluate_pa_hydrokan.py \
-  --config configs/config.xml \
+  --config configs/pa_hydrokan.xml \
   --checkpoint runs/train/<run>/best_raw.pth \
   --split val \
   --device cuda
@@ -57,7 +62,7 @@ conda run -n flood-depth python tools/evaluate_pa_hydrokan.py \
 
 ```bash
 conda run -n flood-depth python tools/infer_pa_hydrokan.py \
-  --config configs/config.xml \
+  --config configs/pa_hydrokan.xml \
   --checkpoint runs/train/<run>/best_raw.pth \
   --input <sample-id> \
   --device cuda \

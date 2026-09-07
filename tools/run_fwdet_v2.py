@@ -12,4 +12,8 @@ from tools._run_terrain_baseline import main_for_model
 
 
 if __name__ == "__main__":
-    raise SystemExit(main_for_model("fwdet_v2", Path("configs/compare/fwdet_v2.xml")))
+    raise SystemExit(
+        main_for_model(
+            "fwdet_v2", Path("configs/compare/traditional/fwdet_v2.xml")
+        )
+    )

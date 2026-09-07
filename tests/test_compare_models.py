@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from compare.fldepth import estimate_depth as estimate_fldepth
-from compare.fwdet_v2 import estimate_depth as estimate_fwdet_v2
-from compare.tsa import estimate_depth as estimate_tsa
+from compare.traditional.fldepth import estimate_depth as estimate_fldepth
+from compare.traditional.fwdet_v2 import estimate_depth as estimate_fwdet_v2
+from compare.traditional.tsa import estimate_depth as estimate_tsa
 
 
 def test_named_compare_models_are_finite_and_support_bounded() -> None:

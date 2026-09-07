@@ -1,6 +1,7 @@
 # Operations
 
-Use `configs/config.xml` as the only entry point. The run directory is
+Use the model-named `configs/pa_hydrokan.xml` entry point for PA-HydroKAN. The
+run directory is
 self-contained and stores the resolved configuration, fingerprints, calibration
 state, checkpoints, metrics, and environment metadata.
 

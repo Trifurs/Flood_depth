@@ -16,15 +16,15 @@ from utils.config import load_config
 from utils.logging import write_rows
 from utils.misc import atomic_write_json, atomic_write_text
 from utils.registry import build_model
-from models.comparison_factory import BUILDERS, build_comparison_model
+from compare.common.comparison_factory import BUILDERS, build_comparison_model
 
 
 LEARNED_COMPARISON_CONFIGS = (
-    Path("configs/dlsim_attention_unet.xml"),
-    Path("configs/dlsim_linknet.xml"),
-    Path("configs/unet_depth_regression.xml"),
-    Path("configs/resnet18_depth_regression.xml"),
-    Path("configs/unetplusplus_depth_regression.xml"),
+    Path("configs/compare/deep_learning/dlsim_attention_unet.xml"),
+    Path("configs/compare/deep_learning/dlsim_linknet.xml"),
+    Path("configs/compare/deep_learning/unet_depth_regression.xml"),
+    Path("configs/compare/deep_learning/resnet18_depth_regression.xml"),
+    Path("configs/compare/deep_learning/unetplusplus_depth_regression.xml"),
 )
 
 

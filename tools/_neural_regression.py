@@ -24,7 +24,6 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from datasets.flooddepth_dataset import prepare_model_inputs
 from datasets.preprocessing import resolve_depth_stratification_bins
 from datasets.supervision_masks import (
     CANONICAL_POSITIVE_MASK,
@@ -32,8 +31,8 @@ from datasets.supervision_masks import (
     supervision_mask_counts,
 )
 from metrics.aggregator import EvaluationAggregator
-from models._depth_regression import prepare_comparison_tensor
-from models.comparison_factory import build_comparison_model
+from compare.common._depth_regression import prepare_comparison_tensor
+from compare.common.comparison_factory import build_comparison_model
 from tools.evaluate_pa_hydrokan import dataset_fingerprint, embed_source_fingerprints, metadata_item
 from tools.train_pa_hydrokan import create_dataloaders
 from utils.amp import resolve_amp
