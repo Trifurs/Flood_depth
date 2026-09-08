@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, Mapping
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,12 +28,14 @@ from datasets.preprocessing import RobustNormalizer, resolve_depth_stratificatio
 from datasets.supervision_masks import canonical_positive_mask_from_batch
 from metrics.aggregator import EvaluationAggregator
 from utils.config import jsonable_config
-from utils.logging import write_rows
+from utils.logging import format_duration, setup_logging, write_rows
 from utils.misc import atomic_write_json
 from utils.raster_io import write_geotiff
+from utils.tensorboard import add_metadata, add_scalars, create_summary_writer, flush
 
 
 FLOOD_SUPPORT = "valid_depth_mask"
+LOGGER = logging.getLogger("comparison.traditional")
 
 
 def _dataset(config: Mapping[str, Any], split: str) -> FloodDepthDataset:
@@ -74,15 +79,32 @@ def run_model(
     """Evaluate one named terrain model using ``valid_depth_mask`` directly."""
 
     _validate_config(config, method)
+    output.mkdir(parents=True, exist_ok=True)
+    setup_logging(
+        output / "evaluate.log",
+        show_python_warnings=bool(config["logging"].get("show_python_warnings", True)),
+    )
+    started = time.perf_counter()
+    LOGGER.info("━" * 78)
+    LOGGER.info("Deterministic evaluation started | model=%s | split=%s", method, split)
+    LOGGER.info("Run directory: %s", output)
+    LOGGER.info("━" * 78)
     estimator = estimator_for(method)
     dataset = _dataset(config, split)
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
     normalizer = RobustNormalizer(Path(config["dataset"]["train_stats"]), dataset.contract)
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
     aggregator = EvaluationAggregator(depth_bins, primary_depth_bins=normalizer.train_depth_bins)
-    output.mkdir(parents=True, exist_ok=False)
     atomic_write_json(output / "resolved_config.json", jsonable_config(config))
-    for batch_index, batch in enumerate(tqdm(loader, desc=f"{method} {split}")):
+    progress = bool(config["logging"].get("progress_bar", False))
+    disable_progress = not progress or os.environ.get("FLOOD_DEPTH_DISABLE_TQDM", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    for batch_index, batch in enumerate(
+        tqdm(loader, desc=f"{method} {split}", leave=False, disable=disable_progress)
+    ):
         if max_batches is not None and batch_index >= max_batches:
             break
         metadata = batch["metadata"]
@@ -109,6 +131,26 @@ def run_model(
     write_rows(output / "metrics_by_event.csv", events)
     write_rows(output / "metrics_by_train_depth_bin.csv", bins)
     atomic_write_json(output / "summary.json", summary)
+    writer = create_summary_writer(
+        output / "tensorboard",
+        enabled=bool(config["logging"].get("tensorboard", False)),
+        flush_seconds=int(config["logging"].get("tensorboard_flush_seconds", 30)),
+        logger=LOGGER,
+    )
+    add_metadata(
+        writer,
+        {"model": method, "split": split, "flood_support": FLOOD_SUPPORT},
+    )
+    add_scalars(writer, summary, step=0, prefix="evaluation")
+    flush(writer)
+    if writer is not None:
+        writer.close()
+    LOGGER.info(
+        "Evaluation complete | elapsed=%s | pixel_micro_mae=%.5f | event_macro_mae=%.5f",
+        format_duration(time.perf_counter() - started),
+        float(summary["pixel_micro_mae"]),
+        float(summary["event_macro_mae"]),
+    )
     return summary
 
 

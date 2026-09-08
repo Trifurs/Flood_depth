@@ -6,7 +6,7 @@
   <seed type="int">20260908</seed>
   <deterministic type="bool">true</deterministic>
   <runtime>
-    <run_tag type="str">seed_20260908</run_tag>
+    <run_id_format type="str">%Y%m%d-%H%M%S-%f</run_id_format>
     <train>
       <output type="none">none</output>
       <resume type="none">none</resume>
@@ -20,6 +20,7 @@
     <evaluation>
       <split type="str">val</split>
       <checkpoint type="none">none</checkpoint>
+      <source_run type="none">none</source_run>
       <output type="none">none</output>
       <weights type="str">raw</weights>
       <validity_mask type="none">none</validity_mask>
@@ -29,7 +30,7 @@
     </evaluation>
   </runtime>
   <training>
-    <epochs type="int">160</epochs>
+    <epochs type="int">200</epochs>
     <minimum_epochs type="int">60</minimum_epochs>
     <batch_size type="int">8</batch_size>
     <gradient_accumulation_steps type="int">1</gradient_accumulation_steps>
@@ -63,6 +64,9 @@
   <logging>
     <csv type="bool">true</csv>
     <tensorboard type="bool">true</tensorboard>
+    <tensorboard_flush_seconds type="int">30</tensorboard_flush_seconds>
+    <progress_bar type="bool">false</progress_bar>
+    <show_python_warnings type="bool">true</show_python_warnings>
     <log_every_steps type="int">10</log_every_steps>
   </logging>
   <checkpoint>

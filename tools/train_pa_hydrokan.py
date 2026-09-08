@@ -59,7 +59,7 @@ from utils.distributed import (
     initialize_distributed,
     reduce_weighted_metrics,
 )
-from utils.logging import append_csv, setup_logging
+from utils.logging import append_csv, log_epoch_summary, log_training_header, setup_logging
 from utils.misc import atomic_write_json, move_to_device
 from utils.registry import build_model
 from utils.seed import seed_everything, seed_worker
@@ -67,6 +67,7 @@ from utils.amp import resolve_amp
 from utils.ema import ModelEMA, restore_ema_after_checkpoint_load
 from utils.graph_metadata import resolved_graph_identity, runtime_graph_identity
 from utils.optim import build_optimizer, build_scheduler
+from utils.tensorboard import add_metadata, add_scalars, create_summary_writer, flush
 
 
 LOGGER = logging.getLogger("train")
@@ -613,6 +614,8 @@ def train_one_epoch(
     csv_enabled: bool = True,
     non_blocking: bool = True,
     input_spec: ModelInputSpec | None = None,
+    progress: bool = False,
+    total_epochs: int | None = None,
 ) -> dict[str, float]:
     model.train()
     if hasattr(loader.sampler, "set_epoch"):
@@ -621,13 +624,18 @@ def train_one_epoch(
     sums: dict[str, float] = {}
     batches = 0
     samples = 0
-    disable_progress = rank != 0 or os.environ.get("FLOOD_DEPTH_DISABLE_TQDM", "").lower() in {
+    disable_progress = (
+        not progress
+        or rank != 0
+        or os.environ.get("FLOOD_DEPTH_DISABLE_TQDM", "").lower() in {
         "1",
         "true",
         "yes",
-    }
-    iterator = tqdm(loader, desc=f"train {epoch + 1}", leave=False, disable=disable_progress)
-    effective_batches = min(len(loader), max_batches or len(loader))
+        }
+    )
+    epoch_label = f"Epoch {epoch + 1:03d}/{total_epochs:03d}" if total_epochs else f"Epoch {epoch + 1}"
+    iterator = tqdm(loader, desc=epoch_label, leave=False, disable=disable_progress)
+    effective_batches = min(len(loader), max_batches if max_batches is not None else len(loader))
     accumulated_samples = 0
     optimizer_steps = 0
     skipped_steps = 0
@@ -747,7 +755,7 @@ def train_one_epoch(
         samples += batch_size
         interval_samples += batch_size
         interval_compute_time += time.perf_counter() - compute_start
-        if rank == 0:
+        if rank == 0 and not disable_progress:
             iterator.set_postfix(loss=f"{float(loss.detach()):.4f}")
         if rank == 0 and csv_enabled and (
             batch_index % max(1, log_every_steps) == 0 or final_batch
@@ -823,7 +831,7 @@ def run_training(args: argparse.Namespace) -> Path:
     device, rank, world_size, local_rank = initialize_distributed(str(config["device"]))
     seed_everything(int(config["seed"]) + rank, bool(config["deterministic"]))
     if rank == 0:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         selected_run_dir = (
             args.resume.resolve().parent
             if args.resume is not None
@@ -835,8 +843,15 @@ def run_training(args: argparse.Namespace) -> Path:
         run_dir_value = None
     run_dir = Path(broadcast_object(run_dir_value, source=0))
     run_dir.mkdir(parents=True, exist_ok=True)
-    setup_logging(run_dir / "train.log" if rank == 0 else None)
-    LOGGER.info("Resolved config: %s", jsonable_config(config))
+    setup_logging(
+        run_dir / "train.log" if rank == 0 else None,
+        level=logging.INFO if rank == 0 else logging.ERROR,
+        show_python_warnings=bool(config["logging"].get("show_python_warnings", True)),
+    )
+    run_started_at = datetime.now(timezone.utc)
+    start_time = time.perf_counter()
+    if rank == 0:
+        LOGGER.info("Preparing data loaders and train-only calibration …")
     train_loader, val_loader, train_dataset, _ = create_dataloaders(config, rank, world_size)
     input_spec = train_dataset.input_spec
     normalizer = train_dataset.normalizer
@@ -860,7 +875,7 @@ def run_training(args: argparse.Namespace) -> Path:
             frozen_depth_balance.train_weight_max,
         )
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
-    LOGGER.info("train-only depth stratification edges (m)=%s", depth_bins)
+    LOGGER.info("Train depth bins: %s", depth_bins)
 
     amp_enabled, amp_dtype, scaler_enabled = resolve_amp(
         device, bool(config["training"]["amp"]),
@@ -900,7 +915,6 @@ def run_training(args: argparse.Namespace) -> Path:
     )
     if total_parameters >= 25_000_000:
         raise RuntimeError(f"Model exceeds the 25M parameter target: {total_parameters}")
-    LOGGER.info("parameters total=%d trainable=%d", total_parameters, trainable_parameters)
     if world_size > 1:
         model = DistributedDataParallel(
             model,
@@ -911,7 +925,8 @@ def run_training(args: argparse.Namespace) -> Path:
     epochs = int(config["training"]["epochs"])
     accumulation = int(config["training"]["gradient_accumulation_steps"])
     effective_train_batches = min(
-        len(train_loader), args.max_train_batches or len(train_loader)
+        len(train_loader),
+        args.max_train_batches if args.max_train_batches is not None else len(train_loader),
     )
     steps_per_epoch = math.ceil(effective_train_batches / accumulation)
     total_steps = max(1, epochs * steps_per_epoch)
@@ -932,6 +947,7 @@ def run_training(args: argparse.Namespace) -> Path:
     fingerprint = dataset_fingerprint(config)
     monitor = str(config["training"]["best_metric"])
     start_epoch, best_metric, patience = 0, float("inf"), 0
+    best_epoch = -1
     global_step = 0
     best_raw_metric, best_ema_metric = float("inf"), float("inf")
     if args.resume is not None:
@@ -1002,6 +1018,7 @@ def run_training(args: argparse.Namespace) -> Path:
         saved_extra = checkpoint.get("extra", {})
         best_raw_metric = float(saved_extra.get("best_raw_metric", best_metric))
         best_ema_metric = float(saved_extra.get("best_ema_metric", best_metric))
+        best_epoch = int(saved_extra.get("best_epoch", -1))
         patience = int(checkpoint.get("extra", {}).get("early_stop_patience", 0))
         if world_size > 1:
             derived_seed = int(config["seed"]) + rank + 1_000_003 * start_epoch
@@ -1010,24 +1027,48 @@ def run_training(args: argparse.Namespace) -> Path:
             val_loader.generator.manual_seed(derived_seed + 100_000)
         LOGGER.info("Resumed %s at epoch %d", args.resume, start_epoch)
 
-    writer = None
-    if rank == 0 and config["logging"]["tensorboard"]:
-        # TensorBoard is an optional observability dependency.  Import it only
-        # for a run that explicitly enables it, so tests and command-line tools
-        # remain usable in minimal environments.
-        from torch.utils.tensorboard import SummaryWriter
-
-        writer = SummaryWriter(run_dir / "tensorboard")
+    writer = create_summary_writer(
+        run_dir / "tensorboard",
+        enabled=rank == 0 and bool(config["logging"].get("tensorboard", False)),
+        flush_seconds=int(config["logging"].get("tensorboard_flush_seconds", 30)),
+        logger=LOGGER,
+    )
     if rank == 0:
+        log_training_header(
+            LOGGER,
+            model=str(config["model"]["display_name"]),
+            run_dir=run_dir,
+            device=str(device),
+            epochs=epochs,
+            batch_size=int(config["training"]["batch_size"]),
+            parameters=trainable_parameters,
+            tensorboard_dir=run_dir / "tensorboard" if writer is not None else None,
+        )
+        add_metadata(
+            writer,
+            {
+                "model": config["model"]["display_name"],
+                "run_id": run_dir.name,
+                "device": device,
+                "seed": config["seed"],
+                "epochs": epochs,
+                "batch_size": config["training"]["batch_size"],
+                "best_metric": monitor,
+            },
+        )
         atomic_write_json(run_dir / "resolved_config.json", jsonable_config(config))
         atomic_write_json(run_dir / "environment.json", environment_payload(device))
         atomic_write_json(run_dir / "dataset_fingerprint.json", fingerprint)
+        run_metadata = {
+            "run_id": run_dir.name,
+            "started_at": run_started_at.isoformat(),
+            "stage": "init_checkpoint" if parent_checkpoint is not None else "train_from_scratch",
+        }
         if parent_checkpoint is not None:
-            atomic_write_json(
-                run_dir / "run_metadata.json",
-                {"stage": "init_checkpoint", "parent_checkpoint": str(parent_checkpoint),
-                 "init_weights": args.init_weights},
+            run_metadata.update(
+                {"parent_checkpoint": str(parent_checkpoint), "init_weights": args.init_weights}
             )
+        atomic_write_json(run_dir / "run_metadata.json", run_metadata)
         atomic_write_json(
             run_dir / "model_summary.json",
             {
@@ -1049,18 +1090,22 @@ def run_training(args: argparse.Namespace) -> Path:
                 "depth_initialization": calibration_payload.get("depth_initialization"),
             },
         )
-    start_time = time.perf_counter()
+    epoch_durations: list[float] = []
+    completed_epochs = start_epoch
+    early_stopped = False
     try:
         for epoch in range(start_epoch, epochs):
             if (
                 epoch >= int(config["training"].get("minimum_epochs", 0))
                 and patience >= int(config["training"]["early_stop_patience"])
             ):
+                early_stopped = True
                 LOGGER.info(
                     "Resume checkpoint already satisfies early stopping at epoch %d",
                     epoch - 1,
                 )
                 break
+            epoch_started = time.perf_counter()
             train_metrics = train_one_epoch(
                 model,
                 train_loader,
@@ -1082,6 +1127,8 @@ def run_training(args: argparse.Namespace) -> Path:
                 bool(config["logging"]["csv"]),
                 bool(config["training"].get("non_blocking", device.type == "cuda")),
                 input_spec,
+                bool(config["logging"].get("progress_bar", False)),
+                epochs,
             )
             global_step += int(train_metrics.get("optimizer_steps", 0.0))
             validation_interval = max(
@@ -1109,6 +1156,7 @@ def run_training(args: argparse.Namespace) -> Path:
                                 "depth_stratification_edges_m": depth_bins,
                                 "primary_depth_stratification_edges_m": normalizer.train_depth_bins,
                                 "early_stop_patience": patience,
+                                "best_epoch": best_epoch,
                                 "best_raw_metric": best_raw_metric,
                                 "best_ema_metric": best_ema_metric,
                                 "graph_identity": runtime_graph_identity(model),
@@ -1117,12 +1165,48 @@ def run_training(args: argparse.Namespace) -> Path:
                             training_context=training_context,
                             global_step=global_step,
                         )
-                    LOGGER.info(
-                        "epoch=%d train_loss=%.5f validation=skipped interval=%d",
-                        epoch,
-                        train_metrics["total"],
-                        validation_interval,
+                    epoch_seconds = time.perf_counter() - epoch_started
+                    epoch_durations.append(epoch_seconds)
+                    elapsed_seconds = time.perf_counter() - start_time
+                    eta_seconds = (
+                        sum(epoch_durations) / len(epoch_durations) * (epochs - epoch - 1)
                     )
+                    add_scalars(writer, train_metrics, step=epoch + 1, prefix="train")
+                    add_scalars(
+                        writer,
+                        {
+                            "epoch_seconds": epoch_seconds,
+                            "elapsed_seconds": elapsed_seconds,
+                            "learning_rate": optimizer.param_groups[0]["lr"],
+                            "early_stop_patience": patience,
+                            "early_stop_remaining": max(
+                                0,
+                                int(config["training"]["early_stop_patience"])
+                                - patience,
+                            ),
+                        },
+                        step=epoch + 1,
+                        prefix="system",
+                    )
+                    flush(writer)
+                    log_epoch_summary(
+                        LOGGER,
+                        epoch=epoch + 1,
+                        total_epochs=epochs,
+                        epoch_seconds=epoch_seconds,
+                        elapsed_seconds=elapsed_seconds,
+                        eta_seconds=eta_seconds,
+                        train_loss=float(train_metrics["total"]),
+                        metric_name=None,
+                        metric_value=None,
+                        best_metric=best_metric,
+                        learning_rate=float(optimizer.param_groups[0]["lr"]),
+                        patience=patience,
+                        patience_limit=int(config["training"]["early_stop_patience"]),
+                        minimum_epochs=int(config["training"].get("minimum_epochs", 0)),
+                        improved=None,
+                    )
+                completed_epochs = epoch + 1
                 continue
             val_summary = None
             ema_summary = None
@@ -1137,7 +1221,7 @@ def run_training(args: argparse.Namespace) -> Path:
                     criterion=criterion,
                     epoch=epoch,
                     max_batches=args.max_val_batches,
-                    progress=True,
+                    progress=bool(config["logging"].get("progress_bar", False)),
                     amp_enabled=amp_enabled,
                     amp_dtype=amp_dtype,
                     input_spec=input_spec,
@@ -1148,7 +1232,8 @@ def run_training(args: argparse.Namespace) -> Path:
                             evaluation_model, val_loader, device, depth_bins,
                             primary_depth_bins=normalizer.train_depth_bins,
                             criterion=criterion, epoch=epoch,
-                            max_batches=args.max_val_batches, progress=True,
+                            max_batches=args.max_val_batches,
+                            progress=bool(config["logging"].get("progress_bar", False)),
                             amp_enabled=amp_enabled, amp_dtype=amp_dtype,
                             input_spec=input_spec,
                         )
@@ -1178,7 +1263,7 @@ def run_training(args: argparse.Namespace) -> Path:
                 scheduler.step(metric)
             improved = metric < best_metric - float(config["training"].get("min_delta", 0.0))
             if improved:
-                best_metric, patience = metric, 0
+                best_metric, best_epoch, patience = metric, epoch, 0
             else:
                 patience += 1
             if rank == 0:
@@ -1190,11 +1275,6 @@ def run_training(args: argparse.Namespace) -> Path:
                     "learning_rate": optimizer.param_groups[0]["lr"],
                     f"best_{monitor}": best_metric,
                 }
-                append_csv(run_dir / "metrics_by_epoch.csv", row)
-                if writer is not None:
-                    for key, value in row.items():
-                        if key != "epoch" and isinstance(value, (int, float)) and np.isfinite(value):
-                            writer.add_scalar(key, value, epoch)
                 common = dict(
                     model=model,
                     optimizer=optimizer,
@@ -1210,6 +1290,7 @@ def run_training(args: argparse.Namespace) -> Path:
                         "depth_stratification_edges_m": depth_bins,
                         "primary_depth_stratification_edges_m": normalizer.train_depth_bins,
                         "early_stop_patience": patience,
+                        "best_epoch": best_epoch,
                         "best_raw_metric": best_raw_metric,
                         "best_ema_metric": best_ema_metric,
                         "graph_identity": runtime_graph_identity(model),
@@ -1242,19 +1323,76 @@ def run_training(args: argparse.Namespace) -> Path:
                         ema=ema, training_context=training_context,
                         global_step=global_step, **ema_common
                     )
-                LOGGER.info(
-                    "epoch=%d train_loss=%.5f val_%s=%.5f best=%.5f",
-                    epoch,
-                    train_metrics["total"],
-                    monitor,
-                    metric,
-                    best_metric,
+                epoch_seconds = time.perf_counter() - epoch_started
+                epoch_durations.append(epoch_seconds)
+                elapsed_seconds = time.perf_counter() - start_time
+                eta_seconds = (
+                    sum(epoch_durations) / len(epoch_durations) * (epochs - epoch - 1)
                 )
+                row.update(
+                    {
+                        "epoch_seconds": epoch_seconds,
+                        "elapsed_seconds": elapsed_seconds,
+                        "eta_seconds": eta_seconds,
+                        "early_stop_patience": patience,
+                        "early_stop_remaining": max(
+                            0, int(config["training"]["early_stop_patience"]) - patience
+                        ),
+                        "improved": improved,
+                    }
+                )
+                if bool(config["logging"].get("csv", True)):
+                    append_csv(run_dir / "metrics_by_epoch.csv", row)
+                add_scalars(writer, train_metrics, step=epoch + 1, prefix="train")
+                add_scalars(writer, val_summary, step=epoch + 1, prefix="validation/raw")
+                add_scalars(writer, ema_summary or {}, step=epoch + 1, prefix="validation/ema")
+                add_scalars(
+                    writer,
+                    {
+                        "learning_rate": optimizer.param_groups[0]["lr"],
+                        "best_metric": best_metric,
+                        "epoch_seconds": epoch_seconds,
+                        "elapsed_seconds": elapsed_seconds,
+                        "eta_seconds": eta_seconds,
+                        "early_stop_patience": patience,
+                        "early_stop_remaining": max(
+                            0, int(config["training"]["early_stop_patience"]) - patience
+                        ),
+                    },
+                    step=epoch + 1,
+                    prefix="system",
+                )
+                flush(writer)
+                log_epoch_summary(
+                    LOGGER,
+                    epoch=epoch + 1,
+                    total_epochs=epochs,
+                    epoch_seconds=epoch_seconds,
+                    elapsed_seconds=elapsed_seconds,
+                    eta_seconds=eta_seconds,
+                    train_loss=float(train_metrics["total"]),
+                    metric_name=monitor,
+                    metric_value=metric,
+                    best_metric=best_metric,
+                    learning_rate=float(optimizer.param_groups[0]["lr"]),
+                    patience=patience,
+                    patience_limit=int(config["training"]["early_stop_patience"]),
+                    minimum_epochs=int(config["training"].get("minimum_epochs", 0)),
+                    improved=improved,
+                )
+            completed_epochs = epoch + 1
             if (
                 epoch + 1 >= int(config["training"].get("minimum_epochs", 0))
                 and patience >= int(config["training"]["early_stop_patience"])
             ):
-                LOGGER.info("Early stopping at epoch %d", epoch)
+                early_stopped = True
+                LOGGER.info(
+                    "Early stopping triggered after epoch %d/%d (patience %d/%d).",
+                    epoch + 1,
+                    epochs,
+                    patience,
+                    int(config["training"]["early_stop_patience"]),
+                )
                 break
     finally:
         if writer is not None:
@@ -1265,12 +1403,32 @@ def run_training(args: argparse.Namespace) -> Path:
                 run_dir / "training_runtime.json",
                 {
                     "elapsed_seconds": elapsed,
+                    "started_at": run_started_at.isoformat(),
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "epochs_completed": completed_epochs,
+                    "early_stopped": early_stopped,
+                    "early_stop_patience": patience,
+                    "best_metric": best_metric,
+                    "best_epoch": best_epoch,
                     "peak_gpu_memory_bytes": torch.cuda.max_memory_allocated(device)
                     if device.type == "cuda"
                     else 0,
                 },
             )
         cleanup_distributed()
+    if rank == 0:
+        atomic_write_json(
+            run_dir / "training_summary.json",
+            {
+                "model": str(config["model"]["name"]),
+                "total_parameters": total_parameters,
+                "trainable_parameters": trainable_parameters,
+                "best_metric_name": monitor,
+                "best_metric": best_metric,
+                "best_epoch": best_epoch,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
     return run_dir
 
 

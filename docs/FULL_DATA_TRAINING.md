@@ -13,19 +13,22 @@ python tools/prepare_flooddepthnet_s1_terrain_assets.py
 
 ## 配置即运行参数
 
-所有共享的运行参数位于 `configs/base/base.xml`：设备、随机种子、run tag、训练 epoch、
+所有共享的运行参数位于 `configs/base/base.xml`：设备、随机种子、运行目录时间格式、训练 epoch、
 batch size、workers、AMP、优化器、scheduler、早停与评估设置均不依赖命令行参数。
 模型结构参数保留在各自模型 XML 中，数据参数保留在
 `configs/base/datasets/flooddepthnet_s1_terrain.xml` 中。
 
 `<runtime>` 是统一入口的控制段：
 
-- `run_tag`：同一 seed 的可追溯结果标签；改 seed 时应同步修改它。
+- `run_id_format`：默认 `%Y%m%d-%H%M%S-%f`，以训练启动时刻生成目录 ID；微秒级后缀确保
+  同一 seed 的重复实验不会相互覆盖。
 - `train`：可选 resume/init checkpoint、批次上限和显式输出目录。
-- `evaluation`：split、checkpoint、weights、预测导出和显式输出目录。
+- `evaluation`：split、checkpoint、`source_run`、weights、预测导出和显式输出目录。未指定
+  checkpoint 时会选择该模型最近一个包含 `best_raw.pth` 的完整训练；需要严格复现实验时，
+  将 `source_run` 设为对应的时间戳目录名。
 
 默认正式基线为 AdamW（`2e-4`，weight decay `1e-4`）、10 epoch warm-up cosine
-schedule、160 epochs 上限、60 epochs 下限、patience 30、batch size 8、8 workers、
+schedule、200 epochs 上限、60 epochs 下限、patience 30、batch size 8、8 workers、
 bfloat16 AMP 与梯度裁剪 1.0；PA-HydroKAN 额外使用 EMA（`0.9995`）。需要调整任何
 参数时，修改 XML，而不是向命令追加覆盖项。
 
@@ -62,10 +65,10 @@ python train.py configs/compare/traditional/fldepth.xml
 python evaluate.py <model-config.xml>
 ```
 
-默认 `runtime.evaluation.split` 为 `val`，并自动使用同一 `run_tag` 训练目录中的
+默认 `runtime.evaluation.split` 为 `val`，并自动使用最近一次完整训练目录中的
 `best_raw.pth`。完成验证集选择后，将 XML 的该字段改为 `test`，再运行同一条
 `python evaluate.py ...` 命令。传统方法没有 checkpoint；`train.py` 与
-`evaluate.py` 对它们都会触发同一确定性评估，因此在同一 `run_tag` 下二选一运行即可。
+`evaluate.py` 对它们都会触发同一确定性评估。
 
 ## 结果目录
 
@@ -73,10 +76,10 @@ python evaluate.py <model-config.xml>
 
 ```text
 runs/flooddepthnet_s1_terrain/
-├── train/<model-run-name>/<run-tag>/
-├── ablation/<variant>/<run-tag>/
-├── evaluate/<model-run-name>/<val-or-test>/<run-tag>/
-├── comparison/<split>/<run-tag>/
+├── train/<model-run-name>/<started-at>/
+├── ablation/<variant>/<started-at>/
+├── evaluate/<model-run-name>/<val-or-test>/<source-training-run>/
+├── comparison/<split>/<comparison-id>/
 ├── inventory/
 └── infer/<model>/<sample-timestamp>/
 ```
@@ -89,3 +92,9 @@ python train.py configs/ablation/pa_hydrokan_no_topographic_affinity_edge_kan.xm
 
 每个训练目录保存解析后的配置、数据指纹、校准状态、checkpoint、参数清单和指标。比较模型
 始终直接使用 `valid_depth_mask` 作为固定洪水范围；PA-HydroKAN 不接收洪水范围输入。
+
+## 训练监控
+
+默认控制台在每个 epoch 输出 `当前 epoch/总 epoch`、本 epoch 耗时、训练损失、验证指标与最优
+值、学习率、早停计数、累计耗时和 ETA。完整逐 epoch 标量同时写入对应运行目录下的
+`tensorboard/`；查看命令和指标标签见 [RUN_MONITORING.md](RUN_MONITORING.md)。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,13 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise RuntimeConfigError(f"{name} must be a configuration mapping")
     return value
+
+
+def _path_component(value: Any, name: str) -> str:
+    component = str(value or "").strip()
+    if not component or Path(component).name != component:
+        raise RuntimeConfigError(f"{name} must be one path component, got {component!r}")
+    return component
 
 
 def runtime_section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
@@ -64,20 +72,20 @@ def model_identifier(config: Mapping[str, Any]) -> str:
         model = _mapping(config.get("model"), "model")
         compare = _mapping(config.get("compare"), "compare")
         value = model.get("name", compare.get("method"))
-    identifier = str(value or "").strip()
-    if not identifier or Path(identifier).name != identifier:
-        raise RuntimeConfigError(f"invalid model run identifier: {identifier!r}")
-    return identifier
+    return _path_component(value, "model run identifier")
 
 
-def run_tag(config: Mapping[str, Any]) -> str:
-    """Return the configuration-owned run label used across every model."""
+def started_at_run_id(
+    config: Mapping[str, Any], started_at: datetime | None = None
+) -> str:
+    """Create the collision-resistant, start-time-based directory identifier."""
 
     runtime = _mapping(config.get("runtime"), "runtime")
-    value = str(runtime.get("run_tag", f"seed_{config.get('seed', 'default')}")).strip()
-    if not value or Path(value).name != value:
-        raise RuntimeConfigError(f"runtime.run_tag must be one path component, got {value!r}")
-    return value
+    time_format = str(runtime.get("run_id_format", "%Y%m%d-%H%M%S-%f"))
+    if not time_format.strip():
+        raise RuntimeConfigError("runtime.run_id_format must not be empty")
+    timestamp = (started_at or datetime.now().astimezone()).strftime(time_format)
+    return _path_component(timestamp, "runtime.run_id_format result")
 
 
 def _runs_root(config: Mapping[str, Any]) -> Path:
@@ -87,20 +95,25 @@ def _runs_root(config: Mapping[str, Any]) -> Path:
     return Path(value)
 
 
-def train_output_path(config: Mapping[str, Any]) -> Path:
-    """Resolve the configured training directory or its common default."""
+def training_runs_root(config: Mapping[str, Any]) -> Path:
+    """Return the collection directory that contains timestamped training runs."""
+
+    ablation = _mapping(config.get("ablation"), "ablation")
+    if ablation:
+        variant = _path_component(ablation.get("variant_id"), "ablation.variant_id")
+        return _runs_root(config) / "ablation" / variant
+    return _runs_root(config) / "train" / model_identifier(config)
+
+
+def train_output_path(config: Mapping[str, Any], run_id: str | None = None) -> Path:
+    """Resolve a configured output or a unique start-time-based training path."""
 
     train = runtime_section(config, "train")
     explicit = optional_path(train.get("output"), "runtime.train.output")
     if explicit is not None:
         return explicit
-    ablation = _mapping(config.get("ablation"), "ablation")
-    if ablation:
-        variant = str(ablation.get("variant_id", "")).strip()
-        if not variant or Path(variant).name != variant:
-            raise RuntimeConfigError(f"invalid ablation.variant_id: {variant!r}")
-        return _runs_root(config) / "ablation" / variant / run_tag(config)
-    return _runs_root(config) / "train" / model_identifier(config) / run_tag(config)
+    identifier = run_id or started_at_run_id(config)
+    return training_runs_root(config) / _path_component(identifier, "run identifier")
 
 
 def evaluation_split(config: Mapping[str, Any]) -> str:
@@ -113,28 +126,69 @@ def evaluation_split(config: Mapping[str, Any]) -> str:
     return split
 
 
-def evaluation_output_path(config: Mapping[str, Any]) -> Path:
-    """Resolve the configured evaluation directory or its common default."""
+def evaluation_output_path(config: Mapping[str, Any], run_id: str | None = None) -> Path:
+    """Resolve a configured output or a start-time/source-run evaluation path."""
 
     evaluation = runtime_section(config, "evaluation")
     explicit = optional_path(evaluation.get("output"), "runtime.evaluation.output")
     if explicit is not None:
         return explicit
+    identifier = run_id or started_at_run_id(config)
     return (
         _runs_root(config)
         / "evaluate"
         / model_identifier(config)
         / evaluation_split(config)
-        / run_tag(config)
+        / _path_component(identifier, "evaluation run identifier")
     )
 
 
+def _configured_source_run(config: Mapping[str, Any]) -> str | None:
+    value = runtime_section(config, "evaluation").get("source_run")
+    if value is None or (
+        isinstance(value, str) and value.strip().lower() in {"", "none", "null"}
+    ):
+        return None
+    return _path_component(value, "runtime.evaluation.source_run")
+
+
+def _latest_completed_checkpoint(config: Mapping[str, Any]) -> Path:
+    root = training_runs_root(config)
+    candidates = (
+        [
+            (child / "best_raw.pth", child / "training_summary.json")
+            for child in root.iterdir()
+            if child.is_dir()
+            and (child / "best_raw.pth").is_file()
+            and (child / "training_summary.json").is_file()
+        ]
+        if root.is_dir()
+        else []
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"No completed training run with best_raw.pth exists in {root}. "
+            "Run `python train.py <model-config.xml>` first, or set "
+            "runtime.evaluation.checkpoint/source_run in the XML."
+        )
+    checkpoint, _ = max(
+        candidates,
+        key=lambda item: (item[1].stat().st_mtime_ns, item[0].parent.name),
+    )
+    return checkpoint
+
+
 def evaluation_checkpoint_path(config: Mapping[str, Any]) -> Path:
-    """Resolve an explicit checkpoint or the selected checkpoint for this run tag."""
+    """Resolve an explicit checkpoint, named source run, or latest completed run."""
 
     evaluation = runtime_section(config, "evaluation")
     explicit = optional_path(evaluation.get("checkpoint"), "runtime.evaluation.checkpoint")
-    return explicit if explicit is not None else train_output_path(config) / "best_raw.pth"
+    if explicit is not None:
+        return explicit
+    source_run = _configured_source_run(config)
+    if source_run is not None:
+        return training_runs_root(config) / source_run / "best_raw.pth"
+    return _latest_completed_checkpoint(config)
 
 
 def allow_existing_output(config: Mapping[str, Any], operation: str) -> bool:
@@ -155,6 +209,7 @@ def ensure_output_is_available(
     if path.exists() and not allow_existing:
         raise FileExistsError(
             f"{operation} output already exists: {path}. "
-            "Change runtime.run_tag, choose an explicit output path, or set the "
-            "operation's allow_existing_output=true deliberately."
+            "A new run receives a distinct start-time directory automatically; for an "
+            "explicit output, choose a different directory or deliberately set "
+            "allow_existing_output=true."
         )

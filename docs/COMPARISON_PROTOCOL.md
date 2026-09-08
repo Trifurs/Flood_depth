@@ -41,13 +41,13 @@ python train.py configs/compare/traditional/fwdet_v2.xml
 
 # Combine same-domain summaries only after all evaluations finish.
 conda run -n flood-depth python tools/compare_results.py \
-  --pa-summary runs/flooddepthnet_s1_terrain/evaluate/pa_hydrokan/val/<run-tag>/summary.json \
-  --baseline-summary runs/flooddepthnet_s1_terrain/evaluate/fwdet_v2/val/<run-tag>/summary.json \
-  --baseline-summary runs/flooddepthnet_s1_terrain/evaluate/tsa/val/<run-tag>/summary.json \
-  --baseline-summary runs/flooddepthnet_s1_terrain/evaluate/fldepth/val/<run-tag>/summary.json \
-  --model-summary runs/flooddepthnet_s1_terrain/evaluate/dlsim_attention_unet/val/<run-tag>/summary.json \
-  --model-summary runs/flooddepthnet_s1_terrain/evaluate/dlsim_linknet/val/<run-tag>/summary.json \
-  --output runs/flooddepthnet_s1_terrain/comparison/val/<run-tag>
+  --pa-summary runs/flooddepthnet_s1_terrain/evaluate/pa_hydrokan/val/<pa-run-id>/summary.json \
+  --baseline-summary runs/flooddepthnet_s1_terrain/evaluate/fwdet_v2/val/<evaluation-id>/summary.json \
+  --baseline-summary runs/flooddepthnet_s1_terrain/evaluate/tsa/val/<evaluation-id>/summary.json \
+  --baseline-summary runs/flooddepthnet_s1_terrain/evaluate/fldepth/val/<evaluation-id>/summary.json \
+  --model-summary runs/flooddepthnet_s1_terrain/evaluate/dlsim_attention_unet/val/<dlsim-attention-run-id>/summary.json \
+  --model-summary runs/flooddepthnet_s1_terrain/evaluate/dlsim_linknet/val/<dlsim-linknet-run-id>/summary.json \
+  --output runs/flooddepthnet_s1_terrain/comparison/val/<comparison-id>
 ```
 
 FwDET allocates the nearest valid outer-boundary elevation as water surface.

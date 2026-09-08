@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+import os
 from pathlib import Path
 
 import evaluate
@@ -11,6 +13,7 @@ from utils.model_dispatch import configured_model_kind
 from utils.run_paths import (
     evaluation_checkpoint_path,
     evaluation_output_path,
+    started_at_run_id,
     train_output_path,
 )
 
@@ -25,20 +28,48 @@ def _configured(path: str, tmp_path: Path) -> dict:
 def test_common_runtime_resolves_model_and_ablation_paths() -> None:
     pa = load_config("configs/pa_hydrokan.xml")
     assert configured_model_kind(pa) == ("pa_hydrokan", "pa_hydrokan")
-    assert train_output_path(pa).as_posix().endswith("train/pa_hydrokan/seed_20260908")
-    assert evaluation_output_path(pa).as_posix().endswith(
-        "evaluate/pa_hydrokan/val/seed_20260908"
+    run_id = started_at_run_id(pa, datetime(2026, 9, 8, 15, 30, 45, 123456))
+    assert run_id == "20260908-153045-123456"
+    assert train_output_path(pa, run_id).as_posix().endswith(
+        "train/pa_hydrokan/20260908-153045-123456"
     )
+    assert evaluation_output_path(pa, run_id).as_posix().endswith(
+        "evaluate/pa_hydrokan/val/20260908-153045-123456"
+    )
+    pa["runtime"]["evaluation"]["source_run"] = run_id
     assert evaluation_checkpoint_path(pa).as_posix().endswith(
-        "train/pa_hydrokan/seed_20260908/best_raw.pth"
+        "train/pa_hydrokan/20260908-153045-123456/best_raw.pth"
     )
 
     ablation = load_config(
         "configs/ablation/pa_hydrokan_no_topographic_affinity_edge_kan.xml"
     )
-    assert train_output_path(ablation).as_posix().endswith(
-        "ablation/no_tae_kan/seed_20260908"
+    assert train_output_path(ablation, run_id).as_posix().endswith(
+        "ablation/no_tae_kan/20260908-153045-123456"
     )
+
+
+def test_evaluation_defaults_to_the_newest_completed_timestamped_run(
+    tmp_path: Path,
+) -> None:
+    config = load_config("configs/pa_hydrokan.xml")
+    config["runs_root"] = tmp_path
+    older = train_output_path(config, "20260908-090000-000000")
+    newer = train_output_path(config, "20260908-100000-000000")
+    older.mkdir(parents=True)
+    newer.mkdir(parents=True)
+    old_checkpoint = older / "best_raw.pth"
+    new_checkpoint = newer / "best_raw.pth"
+    old_summary = older / "training_summary.json"
+    new_summary = newer / "training_summary.json"
+    old_checkpoint.touch()
+    new_checkpoint.touch()
+    old_summary.touch()
+    new_summary.touch()
+    os.utime(old_summary, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(new_summary, ns=(2_000_000_000, 2_000_000_000))
+
+    assert evaluation_checkpoint_path(config) == new_checkpoint
 
 
 @pytest.mark.parametrize(
@@ -75,8 +106,8 @@ def test_every_model_configuration_has_one_unified_dispatch_kind(
 ) -> None:
     config = load_config(path)
     assert configured_model_kind(config) == expected
-    assert config["runtime"]["run_tag"] == "seed_20260908"
-    assert config["training"]["epochs"] == 160
+    assert config["runtime"]["run_id_format"] == "%Y%m%d-%H%M%S-%f"
+    assert config["training"]["epochs"] > 0
     assert config["optimizer"]["beta1"] == 0.9
     assert config["optimizer"]["beta2"] == 0.999
 

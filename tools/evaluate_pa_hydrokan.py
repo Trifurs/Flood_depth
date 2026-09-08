@@ -485,6 +485,7 @@ def run_evaluation(
         ),
         input_spec=input_spec,
         validity_mask=validity_mask or CANONICAL_POSITIVE_MASK,
+        progress=bool(config["logging"].get("progress_bar", False)),
     )
     summary["checkpoint_epoch"] = checkpoint_epoch
     summary["weights"] = weights

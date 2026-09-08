@@ -4,9 +4,9 @@
 Usage:
     python train.py configs/pa_hydrokan.xml
 
-The XML selects the model, data contract, hyperparameters, run tag, and output
-directory.  Traditional methods have no fitting stage, so their invocation runs
-the configured deterministic validation/test evaluation instead.
+The XML selects the model, data contract, hyperparameters, timestamped run
+directory, and output policy. Traditional methods have no fitting stage, so
+their invocation runs the configured deterministic validation/test evaluation.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from argparse import Namespace
 from collections.abc import Mapping
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from utils.run_paths import (
     optional_nonnegative_int,
     optional_path,
     runtime_section,
+    started_at_run_id,
     train_output_path,
 )
 
@@ -102,8 +104,9 @@ def run_from_config(config_path: Path) -> Path | dict[str, Any]:
     path = config_path.expanduser().resolve(strict=True)
     config = load_config(path)
     kind, identifier = configured_model_kind(config)
+    run_id = started_at_run_id(config)
     if kind == "traditional":
-        output = evaluation_output_path(config)
+        output = evaluation_output_path(config, run_id)
         ensure_output_is_available(
             output,
             allow_existing=allow_existing_output(config, "evaluation"),
@@ -121,16 +124,18 @@ def run_from_config(config_path: Path) -> Path | dict[str, Any]:
             bool(runtime_section(config, "evaluation").get("save_predictions", False)),
         )
 
-    output = train_output_path(config)
     train = runtime_section(config, "train")
     resume = optional_path(train.get("resume"), "runtime.train.resume")
     if resume is not None:
-        if output != resume.resolve().parent:
+        configured_output = optional_path(train.get("output"), "runtime.train.output")
+        output = resume.resolve().parent
+        if configured_output is not None and configured_output != output:
             raise RuntimeConfigError(
-                "runtime.train.output/default path must equal the parent directory of "
+                "runtime.train.output must equal the parent directory of "
                 "runtime.train.resume"
             )
     else:
+        output = train_output_path(config, run_id)
         ensure_output_is_available(
             output,
             allow_existing=allow_existing_output(config, "train"),
@@ -151,9 +156,11 @@ def main() -> int:
     args = parse_args()
     result = run_from_config(args.config)
     if isinstance(result, Path):
-        print(f"training output: {result}")
+        logging.getLogger("training").info("Training complete | output=%s", result)
     else:
-        print(result)
+        logging.getLogger("comparison.traditional").info(
+            "Deterministic evaluation results saved."
+        )
     return 0
 
 

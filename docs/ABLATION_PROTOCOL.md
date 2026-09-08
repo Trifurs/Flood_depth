@@ -43,9 +43,9 @@ a one-batch probe measures a component's final effect after optimization.
 python train.py configs/ablation/pa_hydrokan_no_topographic_affinity_edge_kan.xml
 ```
 
-The shared seed, run tag, device, training schedule, and output policy are in
-`configs/base/base.xml`; each ablation derives its output as
-`runs/flooddepthnet_s1_terrain/ablation/<variant>/<run_tag>/`.
+The shared seed, start-time directory format, device, training schedule, and
+output policy are in `configs/base/base.xml`; each ablation derives its output
+as `runs/flooddepthnet_s1_terrain/ablation/<variant>/<started-at>/`.
 
 ## Lightweight functional probe
 

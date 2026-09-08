@@ -45,10 +45,12 @@ pip install -r requirements.txt
 python train.py configs/pa_hydrokan.xml
 ```
 
-Training creates the configuration-owned directory
-`runs/flooddepthnet_s1_terrain/train/<model>/<run-tag>/`. It includes the
-resolved configuration, dataset fingerprint, calibration artifacts, raw and
-EMA checkpoints, metrics, and runtime metadata.
+Training creates the configuration-owned, start-time-stamped directory
+`runs/flooddepthnet_s1_terrain/train/<model>/<YYYYMMDD-HHMMSS-microseconds>/`.
+It includes the resolved configuration, dataset fingerprint, calibration
+artifacts, raw and EMA checkpoints, metrics, and runtime metadata. The random
+seed is recorded as metadata rather than being used as a directory name, so
+repeated experiments with one seed cannot overwrite one another.
 
 ## Evaluate
 
@@ -57,10 +59,26 @@ python evaluate.py configs/pa_hydrokan.xml
 ```
 
 `train.py` and `evaluate.py` accept every PA-HydroKAN, learned-comparison, and
-traditional-comparison XML. The model, device, hyperparameters, run tag,
-checkpoint, split, and result directory come from the inherited `<runtime>` and
+traditional-comparison XML. The model, device, hyperparameters, time-stamped
+run directory, checkpoint, split, and result directory come from the inherited `<runtime>` and
 other configuration sections; no model-specific command-line parameters are
 required.
+
+## Monitor TensorBoard
+
+After a training or evaluation has started, view all event streams with:
+
+```bash
+conda run -n flood-depth tensorboard \
+  --logdir runs/flooddepthnet_s1_terrain \
+  --port 6006
+```
+
+Open <http://localhost:6006>. Training writes `train/*`, `validation/*`, and
+`system/*` scalars once per epoch, including epoch duration, elapsed time, ETA,
+learning rate, and early-stopping progress. Per-run metadata is in the
+TensorBoard **Text** tab. See [docs/RUN_MONITORING.md](docs/RUN_MONITORING.md)
+for focused commands and the harmless TensorBoard TensorFlow notice.
 
 No trained checkpoint is bundled: previous training results were deliberately
 removed before this production reset.
