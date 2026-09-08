@@ -38,6 +38,8 @@ class ModelInputSpec:
         dataset = config.get("dataset", config)
         if not isinstance(dataset, Mapping):
             raise ValueError("dataset configuration must be a mapping")
+        if bool(dataset.get("sentinel2_enabled", False)):
+            raise ValueError("Sentinel-2 is disabled for the production S1/terrain contract")
         return cls.from_mode(dataset.get("input_mode"))
 
     @property

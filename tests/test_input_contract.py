@@ -4,6 +4,7 @@ import pytest
 
 from datasets.model_input_spec import ModelInputSpec
 from datasets.reliability_spec import RELIABILITY_NAMES, ReliabilitySpec
+from utils.config import load_config
 
 
 def test_production_input_contract_has_only_sar_and_terrain_groups() -> None:
@@ -17,3 +18,10 @@ def test_production_input_contract_has_only_sar_and_terrain_groups() -> None:
 def test_nonproduction_input_mode_is_rejected() -> None:
     with pytest.raises(ValueError):
         ModelInputSpec.from_mode("multisensor")
+
+
+def test_active_full_release_configuration_explicitly_disables_sentinel2() -> None:
+    config = load_config("configs/pa_hydrokan.xml")
+    assert config["dataset"]["name"] == "flooddepthnet_s1_terrain"
+    assert config["dataset"]["sentinel2_enabled"] is False
+    assert ModelInputSpec.from_config(config).is_s1_only

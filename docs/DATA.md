@@ -1,13 +1,20 @@
 # Data contract
 
-The active configuration points to the subset stored at
-`/home/whu/桌面/myData/Flood_depth/subset1000`.
+The active configuration uses the complete rebalanced FloodDepthNet v3 release
+at `/media/whu/0d7bb559-7b14-4875-843f-08befb3ca56b/myData/FloodDepthNet`.
+Its event-chain-independent split has 5,323 train, 258 validation, and 254 test
+patches.
 
-`assets/dataset_contract.json` binds the manifest, selected bands, raster
-descriptions, and source file fingerprints. `assets/train_stats.json` contains
-normalization values computed from valid training pixels only. The loader reads
-only Sentinel-1 state, event, change, quality, terrain, masks, and labels.
+`assets/flooddepthnet_s1_terrain/dataset_contract.json` binds the full release
+manifest, active raster descriptions, split counts, and provenance-file
+fingerprints. Its matching
+`assets/flooddepthnet_s1_terrain/train_stats.json` contains train-only robust
+normalization statistics. The active loader opens only Sentinel-1 T1/T2/change,
+S1 QA, DEM, masks, and labels. Sentinel-2 paths may remain in the release
+manifest as metadata, but they are not registered as an input group or read at
+runtime.
 
-Do not modify either asset in place when retraining on the same dataset. Build a
-new audited contract and matching normalization statistics when the data source,
-manifest, bands, or preprocessing change.
+Rebuild both assets with
+`tools/prepare_flooddepthnet_s1_terrain_assets.py` if the release, manifest,
+selected S1 bands, or preprocessing semantics change. The detailed formal
+training workflow is in [FULL_DATA_TRAINING.md](FULL_DATA_TRAINING.md).

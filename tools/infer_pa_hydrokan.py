@@ -104,8 +104,11 @@ def main() -> int:
         frozen_depth_balance_for_config(config),
     )
     sample_id = dataset.rows[index]["sample_id"]
-    output = args.output or Path("runs/infer") / (
-        f"{sample_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    output = args.output or (
+        Path(config["runs_root"])
+        / "infer"
+        / str(config["run_name"])
+        / f"{sample_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
     output = output.resolve()
     summary, samples, events, bins = evaluate_loader(

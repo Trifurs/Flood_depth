@@ -1,11 +1,12 @@
 # Operations
 
-Use the model-named `configs/pa_hydrokan.xml` entry point for PA-HydroKAN. The
-run directory is
-self-contained and stores the resolved configuration, fingerprints, calibration
-state, checkpoints, metrics, and environment metadata.
+The formal full-data workflow, configuration-owned hyperparameters, and
+result-directory layout are in [FULL_DATA_TRAINING.md](FULL_DATA_TRAINING.md).
+Use `python train.py <model-config.xml>` and
+`python evaluate.py <model-config.xml>`; the active configuration uses complete
+FloodDepthNet S1/QA/DEM data only, and Sentinel-2 is disabled.
 
-Before accepting a newly trained model, evaluate the raw checkpoint on the
-validation split with the canonical output-validity mask. Keep the matching run
-directory with the accepted checkpoint so its data and training identity can be
-verified before deployment.
+Each run directory is self-contained and stores the resolved configuration,
+dataset fingerprints, calibration state, checkpoints, metrics, and environment
+metadata. Select a checkpoint on validation data, then evaluate it once on the
+held-out test split using the same canonical output-validity mask.

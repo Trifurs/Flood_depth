@@ -57,7 +57,6 @@ from utils.distributed import (
     broadcast_object,
     cleanup_distributed,
     initialize_distributed,
-    is_main_process,
     reduce_weighted_metrics,
 )
 from utils.logging import append_csv, setup_logging
@@ -829,7 +828,7 @@ def run_training(args: argparse.Namespace) -> Path:
             args.resume.resolve().parent
             if args.resume is not None
             else args.output.resolve() if args.output is not None
-            else Path(config["runs_root"]) / "train" / f"{config['run_name']}_{timestamp}"
+            else Path(config["runs_root"]) / "train" / str(config["run_name"]) / timestamp
         )
         run_dir_value: str | None = str(selected_run_dir)
     else:
@@ -1275,32 +1274,5 @@ def run_training(args: argparse.Namespace) -> Path:
     return run_dir
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--device")
-    parser.add_argument("--epochs", type=int)
-    parser.add_argument("--batch-size", type=int)
-    parser.add_argument("--num-workers", type=int)
-    parser.add_argument("--resume", type=Path)
-    parser.add_argument("--init-checkpoint", type=Path)
-    parser.add_argument("--init-weights", choices=("raw", "ema"), default="raw")
-    parser.add_argument("--max-train-batches", type=int)
-    parser.add_argument("--max-val-batches", type=int)
-    parser.add_argument("--no-amp", action="store_true")
-    parser.add_argument("--seed", type=int)
-    parser.add_argument("--allow-fingerprint-mismatch", action="store_true")
-    parser.add_argument("--output", type=Path)
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    run_dir = run_training(args)
-    if is_main_process():
-        print(f"training output: {run_dir}")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit("Use `python train.py <model-config.xml>` from the project root.")

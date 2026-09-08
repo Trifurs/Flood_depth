@@ -1,9 +1,7 @@
-"""Private shared runner used by the individual terrain-model scripts."""
+"""Private deterministic runner selected by the unified XML dispatcher."""
 
 from __future__ import annotations
 
-import argparse
-import json
 from pathlib import Path
 import sys
 from typing import Any, Mapping
@@ -26,7 +24,7 @@ from datasets.model_input_spec import ModelInputSpec
 from datasets.preprocessing import RobustNormalizer, resolve_depth_stratification_bins
 from datasets.supervision_masks import canonical_positive_mask_from_batch
 from metrics.aggregator import EvaluationAggregator
-from utils.config import jsonable_config, load_config
+from utils.config import jsonable_config
 from utils.logging import write_rows
 from utils.misc import atomic_write_json
 from utils.raster_io import write_geotiff
@@ -114,21 +112,5 @@ def run_model(
     return summary
 
 
-def main_for_model(method: str, default_config: Path) -> int:
-    """Run one named model from its model-specific executable wrapper."""
-
-    parser = argparse.ArgumentParser(
-        description=f"Evaluate {method} with valid_depth_mask as the fixed flood range."
-    )
-    parser.add_argument("--config", type=Path, default=default_config)
-    parser.add_argument("--split", choices=("val", "test"), default="val")
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--max-batches", type=int)
-    parser.add_argument("--save-predictions", action="store_true")
-    args = parser.parse_args()
-    summary = run_model(
-        load_config(args.config), args.split, method, args.output.resolve(),
-        args.max_batches, args.save_predictions,
-    )
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return 0
+if __name__ == "__main__":
+    raise SystemExit("Use `python train.py <model-config.xml>` from the project root.")

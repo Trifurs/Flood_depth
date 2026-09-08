@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import os
 from pathlib import Path
 import sys
@@ -60,7 +59,7 @@ from metrics.physical_metrics import (
 )
 from utils.checkpoint import load_checkpoint
 from utils.config import jsonable_config, load_config
-from utils.logging import setup_logging, write_rows
+from utils.logging import write_rows
 from utils.misc import atomic_write_json, move_to_device
 from utils.raster_io import write_geotiff
 from utils.registry import build_model
@@ -497,43 +496,5 @@ def run_evaluation(
     return summary
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--split", choices=("val", "test"), default="val")
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--save-predictions", action="store_true")
-    parser.add_argument("--max-batches", type=int)
-    parser.add_argument("--weights", choices=("raw", "ema"), default="raw")
-    parser.add_argument("--num-workers", type=int)
-    parser.add_argument(
-        "--validity-mask",
-        choices=(CANONICAL_POSITIVE_MASK, "output_valid", "common_s1", "s1_event_support"),
-    )
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    setup_logging()
-    output = args.output or Path("runs/evaluate") / f"{args.split}_{args.checkpoint.stem}"
-    summary = run_evaluation(
-        args.config,
-        args.checkpoint,
-        args.split,
-        args.device,
-        output.resolve(),
-        args.save_predictions,
-        args.max_batches,
-        args.weights,
-        args.validity_mask,
-        args.num_workers,
-    )
-    print(summary)
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit("Use `python evaluate.py <model-config.xml>` from the project root.")

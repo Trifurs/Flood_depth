@@ -1,39 +1,64 @@
 <config>
   <project_root type="path">.</project_root>
-  <runs_root type="path">runs</runs_root>
-  <artifacts_root type="path">artifacts</artifacts_root>
+  <runs_root type="path">runs/flooddepthnet_s1_terrain</runs_root>
+  <artifacts_root type="path">artifacts/flooddepthnet_s1_terrain</artifacts_root>
   <device type="str">auto</device>
-  <seed type="int">20260904</seed>
+  <seed type="int">20260908</seed>
   <deterministic type="bool">true</deterministic>
+  <runtime>
+    <run_tag type="str">seed_20260908</run_tag>
+    <train>
+      <output type="none">none</output>
+      <resume type="none">none</resume>
+      <init_checkpoint type="none">none</init_checkpoint>
+      <init_weights type="str">raw</init_weights>
+      <allow_fingerprint_mismatch type="bool">false</allow_fingerprint_mismatch>
+      <max_train_batches type="none">none</max_train_batches>
+      <max_val_batches type="none">none</max_val_batches>
+      <allow_existing_output type="bool">false</allow_existing_output>
+    </train>
+    <evaluation>
+      <split type="str">val</split>
+      <checkpoint type="none">none</checkpoint>
+      <output type="none">none</output>
+      <weights type="str">raw</weights>
+      <validity_mask type="none">none</validity_mask>
+      <save_predictions type="bool">false</save_predictions>
+      <max_batches type="none">none</max_batches>
+      <allow_existing_output type="bool">false</allow_existing_output>
+    </evaluation>
+  </runtime>
   <training>
-    <epochs type="int">100</epochs>
-    <minimum_epochs type="int">35</minimum_epochs>
-    <batch_size type="int">12</batch_size>
+    <epochs type="int">160</epochs>
+    <minimum_epochs type="int">60</minimum_epochs>
+    <batch_size type="int">8</batch_size>
     <gradient_accumulation_steps type="int">1</gradient_accumulation_steps>
-    <num_workers type="int">4</num_workers>
+    <num_workers type="int">8</num_workers>
     <persistent_workers type="bool">true</persistent_workers>
+    <prefetch_factor type="int">2</prefetch_factor>
+    <drop_last type="bool">false</drop_last>
+    <non_blocking type="bool">true</non_blocking>
     <amp type="bool">true</amp>
     <amp_dtype type="str">bfloat16</amp_dtype>
     <grad_clip_norm type="float">1.0</grad_clip_norm>
-    <early_stop_patience type="int">20</early_stop_patience>
+    <validation_interval type="int">1</validation_interval>
+    <min_delta type="float">0.0</min_delta>
+    <early_stop_patience type="int">30</early_stop_patience>
     <best_metric type="str">pixel_micro_mae</best_metric>
-    <best_weights type="str">raw</best_weights>
-    <ema_enabled type="bool">true</ema_enabled>
-    <ema_decay type="float">0.999</ema_decay>
-    <ema_warmup_steps type="int">0</ema_warmup_steps>
   </training>
   <optimizer>
     <name type="str">adamw</name>
-    <learning_rate type="float">0.00025</learning_rate>
+    <learning_rate type="float">0.0002</learning_rate>
     <weight_decay type="float">0.0001</weight_decay>
-    <kan_lr_multiplier type="float">0.5</kan_lr_multiplier>
-    <kan_weight_decay type="float">0.000001</kan_weight_decay>
-    <head_lr_multiplier type="float">1.0</head_lr_multiplier>
+    <beta1 type="float">0.9</beta1>
+    <beta2 type="float">0.999</beta2>
+    <epsilon type="float">0.00000001</epsilon>
+    <amsgrad type="bool">false</amsgrad>
   </optimizer>
   <scheduler>
     <name type="str">cosine_with_warmup</name>
-    <warmup_epochs type="int">5</warmup_epochs>
-    <minimum_learning_rate type="float">0.000001</minimum_learning_rate>
+    <warmup_epochs type="int">10</warmup_epochs>
+    <minimum_learning_rate type="float">0.000002</minimum_learning_rate>
   </scheduler>
   <logging>
     <csv type="bool">true</csv>
@@ -45,9 +70,4 @@
     <save_best type="bool">true</save_best>
     <strict_fingerprint type="bool">true</strict_fingerprint>
   </checkpoint>
-  <inference>
-    <nodata type="float">-9999.0</nodata>
-    <save_geotiff type="bool">true</save_geotiff>
-    <save_visualization type="bool">true</save_visualization>
-  </inference>
 </config>

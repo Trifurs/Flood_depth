@@ -40,52 +40,18 @@ counts, and the primary pixel- and event-level depth metrics. Do not claim that
 a one-batch probe measures a component's final effect after optimization.
 
 ```bash
-conda run -n flood-depth python tools/train_pa_hydrokan.py \
-  --config configs/ablation/pa_hydrokan_no_topographic_affinity_edge_kan.xml \
-  --device cuda
+python train.py configs/ablation/pa_hydrokan_no_topographic_affinity_edge_kan.xml
 ```
+
+The shared seed, run tag, device, training schedule, and output policy are in
+`configs/base/base.xml`; each ablation derives its output as
+`runs/flooddepthnet_s1_terrain/ablation/<variant>/<run_tag>/`.
 
 ## Lightweight functional probe
 
-`tools/run_ablation_probe.py` checks that every variant loads a common full
-checkpoint and measures the immediate output change on the same data batch.
-It is a reproducible configuration and sensitivity check, not a substitute for
-the retrained study above.
-
-```bash
-conda run -n flood-depth python tools/run_ablation_probe.py \
-  --checkpoint runs/train/<full_run>/best_raw.pth \
-  --split val --device cpu --batch-size 1 --max-batches 1 \
-  --output runs/ablation/<probe_name>
-```
-
-The probe writes CSV, JSON, and Markdown tables with active trainable parameter
-counts and deltas from the full configuration.
-
-## Local one-batch functional check
-
-On 2026-09-07, the local smoke checkpoint
-`runs/train/pa_hydrokan_subset1000_named_smoke/best_raw.pth` was evaluated on
-the first validation batch (4,638 canonical positive pixels) with the probe.
-The reproducible artifact is
-`runs/ablation/subset1000_one_batch_frozen_weight_probe/`.
-
-| Variant | Pixel MAE (m) | Change from full (m) | Active trainable parameters |
-|---|---:|---:|---:|
-| PA-HydroKAN | 0.308934 | 0.000000 | 3,502,810 |
-| w/o RCP | 0.310482 | +0.001548 | 3,498,234 |
-| w/o TCF | 0.310078 | +0.001143 | 3,439,414 |
-| w/o TAE-KAN | 0.308937 | +0.000003 | 3,391,900 |
-| w/o LCA | 0.308932 | −0.000003 | 3,502,804 |
-
-The RCP and TCF interventions change the frozen checkpoint's prediction on
-this batch. TAE-KAN and its zero-initialized LCA show negligible immediate
-effect after only one optimizer update; this is evidence that the smoke check
-cannot assess their learned contribution, not evidence that they are
-ineffective. The matched retraining protocol above is required for any paper
-table or scientific conclusion.
-
-All four removal variants also completed an independent one-update CPU
-training/validation smoke run under `runs/ablation_training_smoke/`, confirming
-that frozen paths are excluded from optimizer updates without breaking the
-training, EMA, loss, or checkpoint workflows.
+`tools/run_ablation_probe.py` remains an internal sensitivity diagnostic that
+loads a common full checkpoint and measures the immediate output change on the
+same data batch. It is not part of the formal training/evaluation workflow and
+is not a substitute for retraining every XML configuration through the unified
+entry points. Formal experimental parameters and result paths therefore remain
+solely configuration-owned.

@@ -13,6 +13,12 @@ def build_optimizer(model: torch.nn.Module, config: dict) -> torch.optim.Optimiz
         raise ValueError(f"Unsupported optimizer.name {name!r}")
     base_lr = float(optimizer_config["learning_rate"])
     base_decay = float(optimizer_config["weight_decay"])
+    betas = (
+        float(optimizer_config.get("beta1", 0.9)),
+        float(optimizer_config.get("beta2", 0.999)),
+    )
+    epsilon = float(optimizer_config.get("epsilon", 1.0e-8))
+    amsgrad = bool(optimizer_config.get("amsgrad", False))
     kan_lr = float(optimizer_config.get("kan_lr_multiplier", 1.0))
     kan_decay = float(optimizer_config.get("kan_weight_decay", base_decay))
     head_lr = float(optimizer_config.get("head_lr_multiplier", 1.0))
@@ -29,7 +35,7 @@ def build_optimizer(model: torch.nn.Module, config: dict) -> torch.optim.Optimiz
         {"params": parameters, "lr": base_lr * multiplier, "weight_decay": decay,
          "lr_multiplier": multiplier}
         for (multiplier, decay), parameters in groups.items()
-    ], lr=base_lr)
+    ], lr=base_lr, betas=betas, eps=epsilon, amsgrad=amsgrad)
 
 
 def build_scheduler(optimizer, config: dict, total_steps: int, warmup_steps: int):

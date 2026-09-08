@@ -1,6 +1,6 @@
 <config>
   <include path="../../base/base.xml" />
-  <include path="../../base/datasets/subset1000_s1_terrain.xml" />
+  <include path="../../base/datasets/flooddepthnet_s1_terrain.xml" />
   <run_name type="str">resnet18_depth_regression</run_name>
   <model>
     <name type="str">resnet18_depth_regression</name>

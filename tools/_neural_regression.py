@@ -1,8 +1,8 @@
 """Shared training and evaluation mechanics for named learned comparators.
 
-Public entry points in this repository are model-named wrappers.  This private
-module only keeps their data loading, masked objective, checkpoints, and metric
-schema consistent.
+The root-level XML dispatchers are the only public operation entry points. This
+private module keeps comparator data loading, objectives, checkpoints, and
+metric schema consistent while each architecture remains in ``compare/``.
 """
 
 from __future__ import annotations
@@ -207,7 +207,7 @@ def run_training(args: argparse.Namespace, expected_model: str) -> Path:
     run_dir = (
         args.output.resolve()
         if args.output is not None
-        else Path(config["runs_root"]) / "train" / f"{config['run_name']}_{timestamp}"
+        else Path(config["runs_root"]) / "train" / str(config["run_name"]) / timestamp
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(run_dir / "train.log")
@@ -223,6 +223,12 @@ def run_training(args: argparse.Namespace, expected_model: str) -> Path:
         model.parameters(),
         lr=float(config["optimizer"]["learning_rate"]),
         weight_decay=float(config["optimizer"]["weight_decay"]),
+        betas=(
+            float(config["optimizer"].get("beta1", 0.9)),
+            float(config["optimizer"].get("beta2", 0.999)),
+        ),
+        eps=float(config["optimizer"].get("epsilon", 1.0e-8)),
+        amsgrad=bool(config["optimizer"].get("amsgrad", False)),
     )
     epochs = int(config["training"]["epochs"])
     max_train = args.max_train_batches
@@ -369,37 +375,18 @@ def run_evaluation(args: argparse.Namespace, expected_model: str) -> dict[str, A
     )
     summary["checkpoint_epoch"] = int(checkpoint.get("epoch", -1))
     summary.update(_parameter_payload(model, config))
-    output = args.output.resolve() if args.output else Path(config["runs_root"]) / "evaluate" / f"{expected_model}_{args.split}_{args.checkpoint.stem}"
+    output = (
+        args.output.resolve()
+        if args.output
+        else Path(config["runs_root"])
+        / "evaluate"
+        / expected_model
+        / args.split
+        / args.checkpoint.stem
+    )
     _write_evaluation(output, summary, samples, events, bins, config)
     return summary
 
 
-def train_main(expected_model: str, default_config: str) -> int:
-    parser = argparse.ArgumentParser(description=f"Train {expected_model}.")
-    parser.add_argument("--config", type=Path, default=Path(default_config))
-    parser.add_argument("--device")
-    parser.add_argument("--epochs", type=int)
-    parser.add_argument("--batch-size", type=int)
-    parser.add_argument("--num-workers", type=int)
-    parser.add_argument("--max-train-batches", type=int)
-    parser.add_argument("--max-val-batches", type=int)
-    parser.add_argument("--no-amp", action="store_true")
-    parser.add_argument("--seed", type=int)
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
-    print(f"training output: {run_training(args, expected_model)}")
-    return 0
-
-
-def evaluation_main(expected_model: str, default_config: str) -> int:
-    parser = argparse.ArgumentParser(description=f"Evaluate {expected_model}.")
-    parser.add_argument("--config", type=Path, default=Path(default_config))
-    parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--split", choices=("val", "test"), default="val")
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--num-workers", type=int)
-    parser.add_argument("--max-batches", type=int)
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
-    print(run_evaluation(args, expected_model))
-    return 0
+if __name__ == "__main__":
+    raise SystemExit("Use `python train.py <model-config.xml>` from the project root.")

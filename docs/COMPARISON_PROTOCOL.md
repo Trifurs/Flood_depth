@@ -2,26 +2,27 @@
 
 ## Model-specific layout
 
-Every model has a model-named implementation, configuration, and executable
-entry point. Shared loading, metric, and training code lives only in private
-helpers; it does not select or expose a model itself.
+Every model has a model-named implementation and configuration. Shared loading,
+metric, and training code lives only in private helpers; the root-level
+`train.py` and `evaluate.py` resolve the selected model from its XML rather than
+requiring a model-specific command.
 This follows the model/configuration-family separation used by the
 [DEHCD-Net layout](https://github.com/Trifurs/DEHCD-Net).
 The `compare/common/` directory contains all shared comparison utilities and
 registries; `compare/traditional/` and `compare/deep_learning/` contain only
 the named model implementations.
 
-| Identifier | Implementation | Configuration | Executable | Inputs |
+| Identifier | Implementation | Configuration | Unified operation | Inputs |
 |---|---|---|---|---|
-| `pa_hydrokan` | `models/pa_hydrokan.py` | `configs/pa_hydrokan.xml` | `tools/train_pa_hydrokan.py` | S1, QA, DSM/slope |
-| `fwdet_v2` | `compare/traditional/fwdet_v2.py` | `configs/compare/traditional/fwdet_v2.xml` | `tools/run_fwdet_v2.py` | `valid_depth_mask` + DSM |
-| `tsa` | `compare/traditional/tsa.py` | `configs/compare/traditional/tsa.xml` | `tools/run_tsa.py` | `valid_depth_mask` + DSM |
-| `fldepth` | `compare/traditional/fldepth.py` | `configs/compare/traditional/fldepth.xml` | `tools/run_fldepth.py` | `valid_depth_mask` + DSM |
-| `dlsim_attention_unet` | `compare/deep_learning/dlsim_attention_unet.py` | `configs/compare/deep_learning/dlsim_attention_unet.xml` | `tools/train_dlsim_attention_unet.py` / `tools/evaluate_dlsim_attention_unet.py` | S1 change + DSM + `valid_depth_mask` |
-| `dlsim_linknet` | `compare/deep_learning/dlsim_linknet.py` | `configs/compare/deep_learning/dlsim_linknet.xml` | `tools/train_dlsim_linknet.py` / `tools/evaluate_dlsim_linknet.py` | S1 change + DSM + `valid_depth_mask` |
-| `unet_depth_regression` | `compare/deep_learning/unet_depth_regression.py` | `configs/compare/deep_learning/unet_depth_regression.xml` | `tools/train_unet_depth_regression.py` / `tools/evaluate_unet_depth_regression.py` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
-| `resnet18_depth_regression` | `compare/deep_learning/resnet18_depth_regression.py` | `configs/compare/deep_learning/resnet18_depth_regression.xml` | `tools/train_resnet18_depth_regression.py` / `tools/evaluate_resnet18_depth_regression.py` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
-| `unetplusplus_depth_regression` | `compare/deep_learning/unetplusplus_depth_regression.py` | `configs/compare/deep_learning/unetplusplus_depth_regression.xml` | `tools/train_unetplusplus_depth_regression.py` / `tools/evaluate_unetplusplus_depth_regression.py` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
+| `pa_hydrokan` | `models/pa_hydrokan.py` | `configs/pa_hydrokan.xml` | `python train.py <config>` / `python evaluate.py <config>` | S1, QA, DSM/slope |
+| `fwdet_v2` | `compare/traditional/fwdet_v2.py` | `configs/compare/traditional/fwdet_v2.xml` | `python train.py <config>` (deterministic evaluation) | `valid_depth_mask` + DSM |
+| `tsa` | `compare/traditional/tsa.py` | `configs/compare/traditional/tsa.xml` | `python train.py <config>` (deterministic evaluation) | `valid_depth_mask` + DSM |
+| `fldepth` | `compare/traditional/fldepth.py` | `configs/compare/traditional/fldepth.xml` | `python train.py <config>` (deterministic evaluation) | `valid_depth_mask` + DSM |
+| `dlsim_attention_unet` | `compare/deep_learning/dlsim_attention_unet.py` | `configs/compare/deep_learning/dlsim_attention_unet.xml` | `python train.py <config>` / `python evaluate.py <config>` | S1 change + DSM + `valid_depth_mask` |
+| `dlsim_linknet` | `compare/deep_learning/dlsim_linknet.py` | `configs/compare/deep_learning/dlsim_linknet.xml` | `python train.py <config>` / `python evaluate.py <config>` | S1 change + DSM + `valid_depth_mask` |
+| `unet_depth_regression` | `compare/deep_learning/unet_depth_regression.py` | `configs/compare/deep_learning/unet_depth_regression.xml` | `python train.py <config>` / `python evaluate.py <config>` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
+| `resnet18_depth_regression` | `compare/deep_learning/resnet18_depth_regression.py` | `configs/compare/deep_learning/resnet18_depth_regression.xml` | `python train.py <config>` / `python evaluate.py <config>` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
+| `unetplusplus_depth_regression` | `compare/deep_learning/unetplusplus_depth_regression.py` | `configs/compare/deep_learning/unetplusplus_depth_regression.xml` | `python train.py <config>` / `python evaluate.py <config>` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
 
 PA-HydroKAN is a direct conditional-positive-depth regressor: it neither
 predicts nor accepts a flood-range input. Every terrain comparison model uses
@@ -31,44 +32,31 @@ probability raster, threshold, or alternative range-source argument exists.
 ## Commands
 
 ```bash
-# Train/evaluate PA-HydroKAN.
-conda run -n flood-depth python tools/train_pa_hydrokan.py \
-  --config configs/pa_hydrokan.xml --device cuda
-conda run -n flood-depth python tools/evaluate_pa_hydrokan.py \
-  --config configs/pa_hydrokan.xml --checkpoint runs/train/<pa_run>/best_raw.pth \
-  --split val --device cuda
+# Every model reads its own XML; runtime parameters remain in the inherited config.
+python train.py configs/pa_hydrokan.xml
+python evaluate.py configs/pa_hydrokan.xml
+python train.py configs/compare/deep_learning/dlsim_attention_unet.xml
+python evaluate.py configs/compare/deep_learning/dlsim_attention_unet.xml
+python train.py configs/compare/traditional/fwdet_v2.xml
 
-# Evaluate each named terrain model separately.
-conda run -n flood-depth python tools/run_fwdet_v2.py \
-  --config configs/compare/traditional/fwdet_v2.xml --split val --output runs/compare/fwdet_v2/val
-conda run -n flood-depth python tools/run_tsa.py \
-  --config configs/compare/traditional/tsa.xml --split val --output runs/compare/tsa/val
-conda run -n flood-depth python tools/run_fldepth.py \
-  --config configs/compare/traditional/fldepth.xml --split val --output runs/compare/fldepth/val
-
-# Train/evaluate one named learned comparator (repeat with its matching script).
-conda run -n flood-depth python tools/train_dlsim_attention_unet.py --device cuda
-conda run -n flood-depth python tools/evaluate_dlsim_attention_unet.py \
-  --checkpoint runs/train/<dlsim_attention_unet_run>/best_raw.pth --split val --device cuda
-
-# Combine same-domain summaries only.
+# Combine same-domain summaries only after all evaluations finish.
 conda run -n flood-depth python tools/compare_results.py \
-  --pa-summary runs/evaluate/<pa_run>/summary.json \
-  --baseline-summary runs/compare/fwdet_v2/val/summary.json \
-  --baseline-summary runs/compare/tsa/val/summary.json \
-  --baseline-summary runs/compare/fldepth/val/summary.json \
-  --model-summary runs/evaluate/<dlsim_attention_unet_run>/summary.json \
-  --model-summary runs/evaluate/<dlsim_linknet_run>/summary.json \
-  --output runs/comparison/val
+  --pa-summary runs/flooddepthnet_s1_terrain/evaluate/pa_hydrokan/val/<run-tag>/summary.json \
+  --baseline-summary runs/flooddepthnet_s1_terrain/evaluate/fwdet_v2/val/<run-tag>/summary.json \
+  --baseline-summary runs/flooddepthnet_s1_terrain/evaluate/tsa/val/<run-tag>/summary.json \
+  --baseline-summary runs/flooddepthnet_s1_terrain/evaluate/fldepth/val/<run-tag>/summary.json \
+  --model-summary runs/flooddepthnet_s1_terrain/evaluate/dlsim_attention_unet/val/<run-tag>/summary.json \
+  --model-summary runs/flooddepthnet_s1_terrain/evaluate/dlsim_linknet/val/<run-tag>/summary.json \
+  --output runs/flooddepthnet_s1_terrain/comparison/val/<run-tag>
 ```
 
 FwDET allocates the nearest valid outer-boundary elevation as water surface.
 TSA fits a first-degree water-surface trend per connected component. FlDepth
 uses medial-ridge cross-sections and bank-elevation interpolation. The inland
-FwDET adaptation retains zero-elevation boundary exclusion; this subset has no
+FwDET adaptation retains zero-elevation boundary exclusion; this release has no
 permanent-water layer. See [Cohen et al. 2019](https://nhess.copernicus.org/articles/19/2053/2019/)
 and [Chimata et al. 2025](https://nhess.copernicus.org/articles/25/2455/2025/).
 The learned-comparison source and adaptation record is in
 [COMPARISON_SOURCES.md](COMPARISON_SOURCES.md).
-The local one-batch `subset1000` smoke result and parameter table are in
-[SUBSET1000_SMOKE.md](SUBSET1000_SMOKE.md).
+Formal full-data commands and the directory convention are in
+[FULL_DATA_TRAINING.md](FULL_DATA_TRAINING.md).

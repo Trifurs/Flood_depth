@@ -23,7 +23,8 @@ range; no flood-range prediction model is included.
   comparison model.
 - `configs/compare/deep_learning/` — one configuration for each learned
   comparison model.
-- `assets/` — audited dataset contract and train-only normalization statistics.
+- `assets/flooddepthnet_s1_terrain/` — audited complete-release contract and
+  train-only normalization statistics.
 - `models/` — PA-HydroKAN only: SAR encoder, terrain features, TAE-KAN graph,
   decoder, and heads.
 - `compare/common/` — shared comparison blocks, terrain primitives, registries,
@@ -39,46 +40,42 @@ Install a PyTorch build suitable for the local accelerator, then install the
 remaining packages:
 
 ```bash
+conda activate flood-depth
 pip install -r requirements.txt
-conda run -n flood-depth python tools/train_pa_hydrokan.py \
-  --config configs/pa_hydrokan.xml \
-  --device cuda
+python train.py configs/pa_hydrokan.xml
 ```
 
-Training creates a timestamped directory under `runs/train/`. It includes the
+Training creates the configuration-owned directory
+`runs/flooddepthnet_s1_terrain/train/<model>/<run-tag>/`. It includes the
 resolved configuration, dataset fingerprint, calibration artifacts, raw and
 EMA checkpoints, metrics, and runtime metadata.
 
 ## Evaluate
 
 ```bash
-conda run -n flood-depth python tools/evaluate_pa_hydrokan.py \
-  --config configs/pa_hydrokan.xml \
-  --checkpoint runs/train/<run>/best_raw.pth \
-  --split val \
-  --device cuda
+python evaluate.py configs/pa_hydrokan.xml
 ```
 
-## Infer one known sample
-
-```bash
-conda run -n flood-depth python tools/infer_pa_hydrokan.py \
-  --config configs/pa_hydrokan.xml \
-  --checkpoint runs/train/<run>/best_raw.pth \
-  --input <sample-id> \
-  --device cuda \
-  --save-geotiff
-```
+`train.py` and `evaluate.py` accept every PA-HydroKAN, learned-comparison, and
+traditional-comparison XML. The model, device, hyperparameters, run tag,
+checkpoint, split, and result directory come from the inherited `<runtime>` and
+other configuration sections; no model-specific command-line parameters are
+required.
 
 No trained checkpoint is bundled: previous training results were deliberately
 removed before this production reset.
+
+The complete FloodDepthNet training protocol, all model commands, full-data
+hyperparameters, and result directory layout are in
+[docs/FULL_DATA_TRAINING.md](docs/FULL_DATA_TRAINING.md). The active input is
+strictly S1/QA/terrain; Sentinel-2 is not read.
 
 ## Learned comparisons
 
 The retained learned comparators are DLSIM Attention U-Net, DLSIM LinkNet,
 plain U-Net regression, ResNet18 regression, and U-Net++ regression. Each has a
-model-named implementation, XML configuration, training script, and evaluation
-script. Their sources and non-selected candidates are recorded in
+model-named implementation and XML configuration. The root-level unified
+operations select them from XML. Their sources and non-selected candidates are recorded in
 [docs/COMPARISON_SOURCES.md](docs/COMPARISON_SOURCES.md).
 
 PA-HydroKAN's publication-facing name and module terminology are recorded in

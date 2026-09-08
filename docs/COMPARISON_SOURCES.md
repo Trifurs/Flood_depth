@@ -4,7 +4,7 @@
 
 This register records the sources supplied for the learned flood-depth
 comparators and the exact adaptation made for this project. A model is retained
-only when it can consume the audited S1/terrain subset, can use
+only when it can consume the audited complete FloodDepthNet S1/terrain release, can use
 `valid_depth_mask` directly as the common flood range, and has enough public
 architectural information for a traceable implementation. Every selected model
 uses the same train/validation split and reports depth only on
@@ -37,7 +37,7 @@ for these baselines.
 |---|---|---|
 | Swin U-Net flood depth | [Swin-Unet repository](https://github.com/HuCaoFighting/Swin-Unet); supplied [Remote Sensing task DOI](https://doi.org/10.3390/rs18010060) | The public repository targets medical-image segmentation and has a medical-data/pretrained-Swin setup. It does not provide a flood-depth/S1 implementation. Adding a transformer with substantial new training and positional-embedding choices would not be a faithful, minimal adaptation. |
 | SWOT Attention flood-depth network | Li et al., [Journal of Hydrology 2026, 136000](https://doi.org/10.1016/j.jhydrol.2026.136000) | The paper is relevant, but no official training implementation is public and the accessible article record does not expose enough layer-level specification for an auditable reproduction. It is deferred until the full architectural and training specification can be verified. |
-| U-FLOOD adapted | Löwe et al., [Journal of Hydrology 2021, 126898](https://doi.org/10.1016/j.jhydrol.2021.126898); [official DTU code/data archive](https://data.dtu.dk/articles/code/U-FLOOD_-_computer_code_and_data_associated_with_the_article_U-FLOOD_topographic_deep_learning_for_predicting_urban_pluvial_flood_water_depth_/14206838) | U-FLOOD learns urban **pluvial** depths from hydrodynamic-simulation/topographic inputs. This subset has observed S1/terrain inputs but not the rainfall and simulation forcings required to reproduce that task. It is therefore not a like-for-like baseline here. |
+| U-FLOOD adapted | Löwe et al., [Journal of Hydrology 2021, 126898](https://doi.org/10.1016/j.jhydrol.2021.126898); [official DTU code/data archive](https://data.dtu.dk/articles/code/U-FLOOD_-_computer_code_and_data_associated_with_the_article_U-FLOOD_topographic_deep_learning_for_predicting_urban_pluvial_flood_water_depth_/14206838) | U-FLOOD learns urban **pluvial** depths from hydrodynamic-simulation/topographic inputs. This release has observed S1/terrain inputs but not the rainfall and simulation forcings required to reproduce that task. It is therefore not a like-for-like baseline here. |
 
 ## Reference-manager interchange file
 

@@ -1,12 +1,14 @@
 <config>
   <dataset>
-    <name type="str">subset1000_s1_terrain</name>
-    <root type="path">/home/whu/桌面/myData/Flood_depth/subset1000</root>
-    <contract type="path">assets/dataset_contract.json</contract>
-    <manifest type="path">/home/whu/桌面/myData/Flood_depth/subset1000/metadata/training_manifest.csv</manifest>
-    <train_stats type="path">assets/train_stats.json</train_stats>
+    <name type="str">flooddepthnet_s1_terrain</name>
+    <release type="str">FloodDepthNet v3 rebalanced complete release</release>
+    <root type="path">/media/whu/0d7bb559-7b14-4875-843f-08befb3ca56b/myData/FloodDepthNet</root>
+    <contract type="path">assets/flooddepthnet_s1_terrain/dataset_contract.json</contract>
+    <manifest type="path">/media/whu/0d7bb559-7b14-4875-843f-08befb3ca56b/myData/FloodDepthNet/metadata/training_manifest.csv</manifest>
+    <train_stats type="path">assets/flooddepthnet_s1_terrain/train_stats.json</train_stats>
     <patch_size type="int">256</patch_size>
     <input_mode type="str">s1_terrain</input_mode>
+    <sentinel2_enabled type="bool">false</sentinel2_enabled>
     <minimum_event_band_fraction type="float">1.0</minimum_event_band_fraction>
     <continuous_groups type="list" item_type="str">
       <item>s1_t1</item><item>s1_t2</item><item>s1_change</item><item>terrain</item>
