@@ -113,7 +113,7 @@
     <soft_depth_balance_minimum type="float">0.5</soft_depth_balance_minimum>
     <soft_depth_balance_maximum type="float">3.0</soft_depth_balance_maximum>
     <frozen_depth_weights_artifact type="path">artifacts/flooddepthnet_s1_terrain/frozen_depth_weights.json</frozen_depth_weights_artifact>
-    <schedule_total_epochs type="int">160</schedule_total_epochs>
+    <schedule_total_epochs type="int">200</schedule_total_epochs>
     <auxiliary_decay type="str">constant</auxiliary_decay>
   </loss>
 </config>

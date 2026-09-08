@@ -23,6 +23,7 @@ def seed_everything(seed: int, deterministic: bool = True) -> None:
     else:
         torch.use_deterministic_algorithms(False)
         torch.backends.cudnn.benchmark = torch.cuda.is_available()
+        torch.backends.cudnn.deterministic = False
 
 
 def seed_worker(worker_id: int) -> None:

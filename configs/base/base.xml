@@ -4,7 +4,7 @@
   <artifacts_root type="path">artifacts/flooddepthnet_s1_terrain</artifacts_root>
   <device type="str">auto</device>
   <seed type="int">20260908</seed>
-  <deterministic type="bool">true</deterministic>
+  <deterministic type="bool">false</deterministic>
   <runtime>
     <run_id_format type="str">%Y%m%d-%H%M%S-%f</run_id_format>
     <train>
@@ -32,7 +32,7 @@
   <training>
     <epochs type="int">200</epochs>
     <minimum_epochs type="int">60</minimum_epochs>
-    <batch_size type="int">8</batch_size>
+    <batch_size type="int">12</batch_size>
     <gradient_accumulation_steps type="int">1</gradient_accumulation_steps>
     <num_workers type="int">8</num_workers>
     <persistent_workers type="bool">true</persistent_workers>
@@ -65,7 +65,7 @@
     <csv type="bool">true</csv>
     <tensorboard type="bool">true</tensorboard>
     <tensorboard_flush_seconds type="int">30</tensorboard_flush_seconds>
-    <progress_bar type="bool">false</progress_bar>
+    <progress_bar type="bool">true</progress_bar>
     <show_python_warnings type="bool">true</show_python_warnings>
     <log_every_steps type="int">10</log_every_steps>
   </logging>

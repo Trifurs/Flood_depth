@@ -108,6 +108,7 @@ def test_every_model_configuration_has_one_unified_dispatch_kind(
     assert configured_model_kind(config) == expected
     assert config["runtime"]["run_id_format"] == "%Y%m%d-%H%M%S-%f"
     assert config["training"]["epochs"] > 0
+    assert config["logging"]["progress_bar"] is True
     assert config["optimizer"]["beta1"] == 0.9
     assert config["optimizer"]["beta2"] == 0.999
 

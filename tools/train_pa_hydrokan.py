@@ -59,7 +59,13 @@ from utils.distributed import (
     initialize_distributed,
     reduce_weighted_metrics,
 )
-from utils.logging import append_csv, log_epoch_summary, log_training_header, setup_logging
+from utils.logging import (
+    append_csv,
+    configure_training_warning_filters,
+    log_epoch_summary,
+    log_training_header,
+    setup_logging,
+)
 from utils.misc import atomic_write_json, move_to_device
 from utils.registry import build_model
 from utils.seed import seed_everything, seed_worker
@@ -624,18 +630,31 @@ def train_one_epoch(
     sums: dict[str, float] = {}
     batches = 0
     samples = 0
+    effective_batches = min(
+        len(loader), max_batches if max_batches is not None else len(loader)
+    )
     disable_progress = (
         not progress
         or rank != 0
         or os.environ.get("FLOOD_DEPTH_DISABLE_TQDM", "").lower() in {
-        "1",
-        "true",
-        "yes",
+            "1",
+            "true",
+            "yes",
         }
     )
-    epoch_label = f"Epoch {epoch + 1:03d}/{total_epochs:03d}" if total_epochs else f"Epoch {epoch + 1}"
-    iterator = tqdm(loader, desc=epoch_label, leave=False, disable=disable_progress)
-    effective_batches = min(len(loader), max_batches if max_batches is not None else len(loader))
+    epoch_label = (
+        f"Epoch {epoch + 1:03d}/{total_epochs:03d}"
+        if total_epochs
+        else f"Epoch {epoch + 1}"
+    )
+    iterator = tqdm(
+        loader,
+        total=effective_batches,
+        desc=epoch_label,
+        leave=False,
+        disable=disable_progress,
+        dynamic_ncols=True,
+    )
     accumulated_samples = 0
     optimizer_steps = 0
     skipped_steps = 0
@@ -756,7 +775,11 @@ def train_one_epoch(
         interval_samples += batch_size
         interval_compute_time += time.perf_counter() - compute_start
         if rank == 0 and not disable_progress:
-            iterator.set_postfix(loss=f"{float(loss.detach()):.4f}")
+            iterator.set_postfix(
+                loss=f"{float(loss.detach()):.4f}",
+                lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+                refresh=False,
+            )
         if rank == 0 and csv_enabled and (
             batch_index % max(1, log_every_steps) == 0 or final_batch
         ):
@@ -847,6 +870,9 @@ def run_training(args: argparse.Namespace) -> Path:
         run_dir / "train.log" if rank == 0 else None,
         level=logging.INFO if rank == 0 else logging.ERROR,
         show_python_warnings=bool(config["logging"].get("show_python_warnings", True)),
+    )
+    configure_training_warning_filters(
+        deterministic=bool(config["deterministic"]), logger=LOGGER
     )
     run_started_at = datetime.now(timezone.utc)
     start_time = time.perf_counter()

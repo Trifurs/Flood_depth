@@ -41,7 +41,14 @@ from tools.train_pa_hydrokan import create_dataloaders
 from utils.amp import resolve_amp
 from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.config import jsonable_config, load_config
-from utils.logging import append_csv, log_epoch_summary, log_training_header, setup_logging, write_rows
+from utils.logging import (
+    append_csv,
+    configure_training_warning_filters,
+    log_epoch_summary,
+    log_training_header,
+    setup_logging,
+    write_rows,
+)
 from utils.misc import atomic_write_json, move_to_device
 from utils.optim import build_scheduler
 from utils.seed import seed_everything
@@ -233,6 +240,9 @@ def run_training(args: argparse.Namespace, expected_model: str) -> Path:
         run_dir / "train.log",
         show_python_warnings=bool(config["logging"].get("show_python_warnings", True)),
     )
+    configure_training_warning_filters(
+        deterministic=bool(config["deterministic"]), logger=LOGGER
+    )
     run_started_at = datetime.now(timezone.utc)
     start_time = time.perf_counter()
     LOGGER.info("Preparing learned comparison model and data loaders …")
@@ -346,14 +356,15 @@ def run_training(args: argparse.Namespace, expected_model: str) -> Path:
                 in {"1", "true", "yes"}
             )
             optimizer.zero_grad(set_to_none=True)
-            for batch_index, cpu_batch in enumerate(
-                tqdm(
-                    train_loader,
-                    desc=f"Epoch {epoch + 1:03d}/{epochs:03d}",
-                    leave=False,
-                    disable=disable_progress,
-                )
-            ):
+            iterator = tqdm(
+                train_loader,
+                total=effective_train_batches,
+                desc=f"Epoch {epoch + 1:03d}/{epochs:03d}",
+                leave=False,
+                disable=disable_progress,
+                dynamic_ncols=True,
+            )
+            for batch_index, cpu_batch in enumerate(iterator):
                 if batch_index >= effective_train_batches:
                     break
                 batch = move_to_device(
@@ -397,6 +408,12 @@ def run_training(args: argparse.Namespace, expected_model: str) -> Path:
                         global_step += 1
                 total_loss += float(loss.detach().cpu())
                 batches += 1
+                if not disable_progress:
+                    iterator.set_postfix(
+                        loss=f"{float(loss.detach()):.4f}",
+                        lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+                        refresh=False,
+                    )
             if batches == 0:
                 raise RuntimeError("No comparison training batches were executed")
 

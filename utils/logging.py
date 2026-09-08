@@ -6,6 +6,7 @@ import csv
 import io
 import logging
 import math
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,35 @@ def setup_logging(
     )
     logging.captureWarnings(True)
     logging.getLogger("py.warnings").disabled = not show_python_warnings
+
+
+def configure_training_warning_filters(
+    *, deterministic: bool, logger: logging.Logger
+) -> None:
+    """Condense one known PyTorch warning without hiding unrelated warnings.
+
+    PyTorch currently has no bitwise-deterministic CUDA backward kernel for
+    adaptive average pooling.  The project intentionally requests deterministic
+    algorithms in ``warn_only`` mode, so a long framework warning otherwise
+    interrupts the first epoch.  Keep all other warnings visible and record the
+    reproducibility limitation once in a compact, searchable form.
+    """
+
+    if not deterministic:
+        return
+    warnings.filterwarnings(
+        "ignore",
+        message=(
+            r"adaptive_avg_pool2d_backward_cuda does not have a deterministic "
+            r"implementation.*"
+        ),
+        category=UserWarning,
+    )
+    logger.info(
+        "Reproducibility note | deterministic mode is seed-controlled; "
+        "PyTorch has no bitwise-deterministic CUDA backward for adaptive "
+        "average pooling, so its known framework warning is condensed."
+    )
 
 
 def format_duration(seconds: float | None) -> str:

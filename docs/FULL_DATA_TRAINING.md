@@ -28,9 +28,21 @@ batch size、workers、AMP、优化器、scheduler、早停与评估设置均不
   将 `source_run` 设为对应的时间戳目录名。
 
 默认正式基线为 AdamW（`2e-4`，weight decay `1e-4`）、10 epoch warm-up cosine
-schedule、200 epochs 上限、60 epochs 下限、patience 30、batch size 8、8 workers、
+schedule、200 epochs 上限、60 epochs 下限、patience 30、batch size 12、8 workers、
 bfloat16 AMP 与梯度裁剪 1.0；PA-HydroKAN 额外使用 EMA（`0.9995`）。需要调整任何
 参数时，修改 XML，而不是向命令追加覆盖项。
+
+### 当前工作站的实测硬件配置
+
+在完整训练集与 RTX 5090（32 GB）上，PA-HydroKAN 的 batch size 12 已完成完整 epoch，
+峰值训练显存约 28.1 GiB；继续增大 batch 缺少稳定余量。8 个 workers、`prefetch_factor=2`、
+`persistent_workers=true` 与非阻塞传输下，数据等待约为 0.004 s/10 batch，远小于约
+3.65 s/10 batch 的计算时间，因此增加 workers 或预取数量没有实际收益。
+
+基础配置现采用 `deterministic=false`：真实 batch 微基准在相同 BF16、batch size 12 下为
+47.86 samples/s，相比严格 deterministic 的 32.53 samples/s 快约 47%，两种设置均为有限
+loss。随机种子仍固定；该模式不承诺逐位重现。若需要严格算法确定性，可将该字段改回 `true`，
+并接受明显的吞吐下降。TF32 额外开启的收益不足 1%，因此保持 FP32 高精度策略。
 
 ## 统一入口
 
