@@ -2,8 +2,8 @@
 """Run same-checkpoint functional probes for PA-HydroKAN ablation variants.
 
 This tool deliberately does not substitute for a retrained ablation study.  It
-loads one full-model checkpoint into state-schema-compatible variants, bypasses
-one named module at a time, and evaluates every variant on exactly the same
+loads one full-model checkpoint into state-schema-compatible variants, applies
+the complete three-factor removal design, and evaluates every variant on the same
 validation batches.  The resulting deltas establish functional sensitivity and
 configuration validity; final claims require matched retraining across seeds.
 """
@@ -41,11 +41,14 @@ from utils.registry import build_model
 
 
 DEFAULT_CONFIGS = (
-    Path("configs/ablation/pa_hydrokan_full.xml"),
-    Path("configs/ablation/pa_hydrokan_no_reliability_conditioning.xml"),
-    Path("configs/ablation/pa_hydrokan_no_terrain_conditioned_fusion.xml"),
-    Path("configs/ablation/pa_hydrokan_no_topographic_affinity_edge_kan.xml"),
-    Path("configs/ablation/pa_hydrokan_no_latent_compatibility.xml"),
+    Path("configs/pa_hydrokan.xml"),
+    Path("configs/ablation/pa_hydrokan_wo_rcp.xml"),
+    Path("configs/ablation/pa_hydrokan_wo_tcf.xml"),
+    Path("configs/ablation/pa_hydrokan_wo_tae_kan.xml"),
+    Path("configs/ablation/pa_hydrokan_wo_rcp_tcf.xml"),
+    Path("configs/ablation/pa_hydrokan_wo_rcp_tae_kan.xml"),
+    Path("configs/ablation/pa_hydrokan_wo_tcf_tae_kan.xml"),
+    Path("configs/ablation/pa_hydrokan_wo_rcp_tcf_tae_kan.xml"),
 )
 
 
@@ -95,8 +98,15 @@ def _loader(
 def _ablation_metadata(config: Mapping[str, Any], path: Path) -> Mapping[str, Any]:
     ablation = config.get("ablation")
     if not isinstance(ablation, Mapping):
+        if path.name == "pa_hydrokan.xml":
+            return {
+                "variant_id": "full",
+                "display_name": "PA-HydroKAN",
+                "removed_modules": [],
+                "training_rule": "main_model_reference",
+            }
         raise KeyError(f"Ablation configuration {path} requires an <ablation> section")
-    required = ("variant_id", "display_name", "removed_module", "training_rule")
+    required = ("variant_id", "display_name", "removed_modules", "training_rule")
     missing = [key for key in required if key not in ablation]
     if missing:
         raise KeyError(f"Ablation configuration {path} is missing {missing}")
@@ -107,7 +117,7 @@ def _markdown(rows: Sequence[Mapping[str, Any]]) -> str:
     fields = (
         "variant_id",
         "display_name",
-        "removed_module",
+        "removed_modules",
         "trainable_parameters",
         "pixel_micro_mae",
         "pixel_micro_mae_delta_from_full",
@@ -167,7 +177,9 @@ def run_probe(
             {
                 "variant_id": str(ablation["variant_id"]),
                 "display_name": str(ablation["display_name"]),
-                "removed_module": str(ablation["removed_module"]),
+                "removed_modules": "+".join(
+                    str(value) for value in ablation["removed_modules"]
+                ) or "none",
                 "training_rule": str(ablation["training_rule"]),
                 "config": str(path),
                 "total_parameters": total_parameters,

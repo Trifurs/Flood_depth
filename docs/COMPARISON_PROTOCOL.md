@@ -4,8 +4,8 @@
 
 Every model has a model-named implementation and configuration. Shared loading,
 metric, and training code lives only in private helpers; the root-level
-`train.py` and `evaluate.py` resolve the selected model from its XML rather than
-requiring a model-specific command.
+`train.py` resolves every trainable model from its XML; root-level `test.py`
+discovers completed checkpoints and tests all models in one operation.
 This follows the model/configuration-family separation used by the
 [DEHCD-Net layout](https://github.com/Trifurs/DEHCD-Net).
 The `compare/common/` directory contains all shared comparison utilities and
@@ -15,9 +15,9 @@ the named model implementations.
 | Identifier | Implementation | Configuration | Unified operation | Inputs |
 |---|---|---|---|---|
 | `pa_hydrokan` | `models/pa_hydrokan.py` | `configs/pa_hydrokan.xml` | `python train.py <config>` / `python evaluate.py <config>` | S1, QA, DSM/slope |
-| `fwdet_v2` | `compare/traditional/fwdet_v2.py` | `configs/compare/traditional/fwdet_v2.xml` | `python train.py <config>` (deterministic evaluation) | `valid_depth_mask` + DSM |
-| `tsa` | `compare/traditional/tsa.py` | `configs/compare/traditional/tsa.xml` | `python train.py <config>` (deterministic evaluation) | `valid_depth_mask` + DSM |
-| `fldepth` | `compare/traditional/fldepth.py` | `configs/compare/traditional/fldepth.xml` | `python train.py <config>` (deterministic evaluation) | `valid_depth_mask` + DSM |
+| `fwdet_v2` | `compare/traditional/fwdet_v2.py` | `configs/compare/traditional/fwdet_v2.xml` | `python test.py <runs-directory>` | `valid_depth_mask` + DSM |
+| `tsa` | `compare/traditional/tsa.py` | `configs/compare/traditional/tsa.xml` | `python test.py <runs-directory>` | `valid_depth_mask` + DSM |
+| `fldepth` | `compare/traditional/fldepth.py` | `configs/compare/traditional/fldepth.xml` | `python test.py <runs-directory>` | `valid_depth_mask` + DSM |
 | `dlsim_attention_unet` | `compare/deep_learning/dlsim_attention_unet.py` | `configs/compare/deep_learning/dlsim_attention_unet.xml` | `python train.py <config>` / `python evaluate.py <config>` | S1 change + DSM + `valid_depth_mask` |
 | `dlsim_linknet` | `compare/deep_learning/dlsim_linknet.py` | `configs/compare/deep_learning/dlsim_linknet.xml` | `python train.py <config>` / `python evaluate.py <config>` | S1 change + DSM + `valid_depth_mask` |
 | `unet_depth_regression` | `compare/deep_learning/unet_depth_regression.py` | `configs/compare/deep_learning/unet_depth_regression.xml` | `python train.py <config>` / `python evaluate.py <config>` | S1 T1/T2/change + DSM/slope + `valid_depth_mask` |
@@ -37,7 +37,10 @@ python train.py configs/pa_hydrokan.xml
 python evaluate.py configs/pa_hydrokan.xml
 python train.py configs/compare/deep_learning/dlsim_attention_unet.xml
 python evaluate.py configs/compare/deep_learning/dlsim_attention_unet.xml
-python train.py configs/compare/traditional/fwdet_v2.xml
+
+# Test the newest completed run of every discovered learned model and all
+# traditional methods (traditional evaluation is enabled by default).
+python test.py runs/flooddepthnet_s1_terrain/train
 
 # Combine same-domain summaries only after all evaluations finish.
 conda run -n flood-depth python tools/compare_results.py \

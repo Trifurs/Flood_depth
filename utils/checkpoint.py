@@ -18,6 +18,123 @@ class CheckpointError(RuntimeError):
     """Raised for incompatible or incomplete checkpoint state."""
 
 
+def initialize_from_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    *,
+    weights: str = "raw",
+    transfer: str = "strict",
+    expected_fingerprint: Mapping[str, str] | None = None,
+    map_location: str | torch.device = "cpu",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Initialize a new training stage from raw or EMA checkpoint weights.
+
+    ``strict`` preserves the ordinary exact architecture contract.
+    ``compatible`` is deliberately narrow: identical tensors are transferred,
+    while the PA-HydroKAN terrain stem may append zero-initialized input
+    channels.  Newly introduced residual adapters retain their identity/zero
+    initialization.  This makes architecture screening reproducible without
+    weakening the strict semantics of resume or evaluation.
+    """
+
+    if weights not in {"raw", "ema"}:
+        raise CheckpointError("initial checkpoint weights must be raw or ema")
+    if transfer not in {"strict", "compatible"}:
+        raise CheckpointError("initial checkpoint transfer must be strict or compatible")
+    checkpoint = torch.load(Path(path), map_location=map_location, weights_only=False)
+    if expected_fingerprint is not None and dict(
+        checkpoint.get("dataset_fingerprint", {})
+    ) != dict(expected_fingerprint):
+        raise CheckpointError(
+            "Dataset contract, manifest, or normalization fingerprint differs from checkpoint"
+        )
+    source = checkpoint.get("ema_model") if weights == "ema" else checkpoint.get("model")
+    if source is None:
+        if weights == "ema":
+            source = checkpoint.get("model")
+            weights = "raw"
+        if source is None:
+            raise CheckpointError("initial checkpoint contains no model state")
+    if not isinstance(source, Mapping):
+        raise CheckpointError("initial checkpoint model state is not a mapping")
+
+    unwrapped = model.module if hasattr(model, "module") else model
+    if transfer == "strict":
+        unwrapped.load_state_dict(source, strict=True)
+        report = {
+            "transfer": transfer,
+            "weights": weights,
+            "exact_tensor_count": len(source),
+            "expanded_tensor_count": 0,
+            "new_tensor_count": 0,
+            "unused_source_tensor_count": 0,
+            "loaded_parameter_fraction": 1.0,
+        }
+    else:
+        target = unwrapped.state_dict()
+        exact: list[str] = []
+        expanded: list[str] = []
+        loaded_numel = 0
+        for name, source_value in source.items():
+            target_value = target.get(name)
+            if target_value is None:
+                continue
+            if tuple(source_value.shape) == tuple(target_value.shape):
+                target[name] = source_value.to(
+                    device=target_value.device, dtype=target_value.dtype
+                )
+                exact.append(name)
+                loaded_numel += target_value.numel()
+                continue
+            if (
+                name == "terrain.stem.0.0.weight"
+                and source_value.ndim == target_value.ndim == 4
+                and source_value.shape[0] == target_value.shape[0]
+                and source_value.shape[2:] == target_value.shape[2:]
+                and source_value.shape[1] < target_value.shape[1]
+            ):
+                initialized = torch.zeros_like(target_value)
+                initialized[:, : source_value.shape[1]] = source_value.to(
+                    device=target_value.device, dtype=target_value.dtype
+                )
+                target[name] = initialized
+                expanded.append(name)
+                loaded_numel += source_value.numel()
+        loaded_names = set(exact).union(expanded)
+        # A same-named tensor with a different shape was not transferred and
+        # must be treated as newly initialized.  This distinction is critical
+        # when ``trainable_scope=new_adapters`` is used for compact architecture
+        # transfer; otherwise those tensors would be silently frozen at random
+        # initialization.
+        new_names = sorted(set(target).difference(loaded_names))
+        unused_names = sorted(set(source).difference(loaded_names))
+        unwrapped.load_state_dict(target, strict=True)
+        total_numel = sum(value.numel() for value in target.values())
+        loaded_fraction = loaded_numel / max(total_numel, 1)
+        if loaded_fraction < 0.90:
+            raise CheckpointError(
+                "Compatible initialization transferred too little model state: "
+                f"{loaded_fraction:.3%} < 90.000%"
+            )
+        report = {
+            "transfer": transfer,
+            "weights": weights,
+            "exact_tensor_count": len(exact),
+            "expanded_tensor_count": len(expanded),
+            "expanded_tensors": expanded,
+            "new_tensor_count": len(new_names),
+            "new_tensors": new_names,
+            "unused_source_tensor_count": len(unused_names),
+            "unused_source_tensors": unused_names,
+            "loaded_parameter_fraction": loaded_fraction,
+        }
+    heads = getattr(unwrapped, "heads", None)
+    setter = getattr(heads, "set_depth_output_semantics", None)
+    if callable(setter):
+        setter(checkpoint_depth_output_semantics(checkpoint))
+    return checkpoint, report
+
+
 def training_identity_sha256(
     resolved_config: Mapping[str, Any],
     dataset_fingerprint: Mapping[str, str],

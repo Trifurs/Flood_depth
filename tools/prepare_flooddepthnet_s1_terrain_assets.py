@@ -350,8 +350,14 @@ def _new_accumulator_map(
     return result
 
 
-def _read_manifest(dataset_root: Path) -> tuple[list[dict[str, str]], list[str]]:
-    manifest_path = dataset_root / MANIFEST_RELATIVE_PATH
+def _read_manifest(
+    dataset_root: Path, manifest_path: Path | None = None
+) -> tuple[list[dict[str, str]], list[str]]:
+    manifest_path = (
+        dataset_root / MANIFEST_RELATIVE_PATH
+        if manifest_path is None
+        else manifest_path.expanduser().resolve(strict=True)
+    )
     if not manifest_path.is_file():
         raise DatasetPreparationError(f"missing manifest: {manifest_path}")
     with manifest_path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -437,18 +443,30 @@ def build_assets(
     output_directory: Path,
     reservoir_capacity: int,
     seed: int,
+    manifest_path: Path | None = None,
 ) -> tuple[Path, Path]:
-    """Audit the complete release and write matching contract/statistics assets."""
+    """Audit a release split manifest and write bound contract/statistics assets.
+
+    A custom manifest is used by event-grouped cross-validation. The immutable
+    release manifest/readiness marker remain fingerprinted as source provenance,
+    while normalization and sample counts bind to the custom fold manifest.
+    """
 
     root = dataset_root.expanduser().resolve(strict=True)
-    rows, fieldnames = _read_manifest(root)
-    manifest_path = root / MANIFEST_RELATIVE_PATH
-    manifest_sha256 = sha256_file(manifest_path)
-    ready_marker = _load_ready_marker(root, manifest_sha256)
+    source_manifest_path = root / MANIFEST_RELATIVE_PATH
+    source_manifest_sha256 = sha256_file(source_manifest_path)
+    ready_marker = _load_ready_marker(root, source_manifest_sha256)
+    active_manifest_path = (
+        source_manifest_path
+        if manifest_path is None
+        else manifest_path.expanduser().resolve(strict=True)
+    )
+    rows, fieldnames = _read_manifest(root, active_manifest_path)
+    manifest_sha256 = sha256_file(active_manifest_path)
     key_hashes = _dataset_key_hashes(root)
     split_counts = {split: sum(row["split"] == split for row in rows) for split in EXPECTED_SPLITS}
     expected_counts = ready_marker.get("split_audit", {}).get("patches_by_split", {})
-    if expected_counts and {
+    if manifest_path is None and expected_counts and {
         split: int(expected_counts.get(split, -1)) for split in EXPECTED_SPLITS
     } != split_counts:
         raise DatasetPreparationError(
@@ -663,10 +681,19 @@ def build_assets(
     contract_payload = {
         "dataset_root": str(root),
         "key_file_sha256": key_hashes,
-        "manifest": {
-            "relative_path": MANIFEST_RELATIVE_PATH.as_posix(),
-            "sha256": manifest_sha256,
-        },
+        "manifest": (
+            {
+                "relative_path": MANIFEST_RELATIVE_PATH.as_posix(),
+                "sha256": manifest_sha256,
+            }
+            if manifest_path is None
+            else {
+                "path": str(active_manifest_path),
+                "sha256": manifest_sha256,
+                "source_relative_path": MANIFEST_RELATIVE_PATH.as_posix(),
+                "source_sha256": source_manifest_sha256,
+            }
+        ),
         "modality_policy": {
             "active_input_mode": "s1_terrain",
             "active_raster_groups": list(GROUP_SPECS),
@@ -710,6 +737,12 @@ def parse_args() -> argparse.Namespace:
         help="Uniform train-value samples retained per normalized band.",
     )
     parser.add_argument("--seed", type=int, default=20260908)
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Optional alternate train/val/test manifest for event-grouped resampling.",
+    )
     return parser.parse_args()
 
 
@@ -720,6 +753,7 @@ def main() -> int:
         args.output_directory,
         args.reservoir_capacity,
         args.seed,
+        args.manifest,
     )
     return 0
 

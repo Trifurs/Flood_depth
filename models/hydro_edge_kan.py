@@ -54,6 +54,7 @@ class HydroEdgeKAN(nn.Module):
         gamma_init_effective: float = 0.02,
         gamma_max: float = 0.25,
         latent_compatibility_enabled: bool = True,
+        path_barrier_mode: str = "full_resolution",
         diagnostic_mode: bool = False,
         diagnostics_enabled: bool | None = None,
     ) -> None:
@@ -77,6 +78,11 @@ class HydroEdgeKAN(nn.Module):
         )
         self.gamma_max = float(gamma_max)
         self.latent_compatibility_enabled = bool(latent_compatibility_enabled)
+        self.path_barrier_mode = str(path_barrier_mode)
+        if self.path_barrier_mode not in {"full_resolution", "graph_scale"}:
+            raise ValueError(
+                "HydroEdgeKAN path_barrier_mode must be full_resolution or graph_scale"
+            )
         self.diagnostic_mode = (
             bool(diagnostic_mode)
             if diagnostics_enabled is None
@@ -216,18 +222,53 @@ class HydroEdgeKAN(nn.Module):
         signed_dz = (neighbour_z - z.unsqueeze(1)) / distance.clamp_min(1.0e-6)
         edge_slope = signed_dz.abs()
         relative_height = 0.5 * (relative.unsqueeze(1) + neighbour_relative)
-        path_barrier, path_valid = path_barrier_proxy(
-            physical["dsm_elevation"], dem_full, self.graph_feature_stride,
-            physical["z_ground_proxy"], statistic="max", quantile=0.9,
-        )
-        path_barrier = torch.stack(
-            [F.adaptive_avg_pool2d(path_barrier[:, index], size) for index in range(len(DIRECTIONS))],
-            dim=1,
-        )
-        path_valid = torch.stack(
-            [F.adaptive_avg_pool2d(path_valid[:, index], size) for index in range(len(DIRECTIONS))],
-            dim=1,
-        )
+        if self.path_barrier_mode == "full_resolution":
+            path_barrier, path_valid = path_barrier_proxy(
+                physical["dsm_elevation"], dem_full, self.graph_feature_stride,
+                physical["z_ground_proxy"], statistic="max", quantile=0.9,
+            )
+            path_barrier = torch.stack(
+                [
+                    F.adaptive_avg_pool2d(path_barrier[:, index], size)
+                    for index in range(len(DIRECTIONS))
+                ],
+                dim=1,
+            )
+            path_valid = torch.stack(
+                [
+                    F.adaptive_avg_pool2d(path_valid[:, index], size)
+                    for index in range(len(DIRECTIONS))
+                ],
+                dim=1,
+            )
+        else:
+            # A graph edge joins adjacent stride-sized terrain cells. Pool each
+            # cell's DSM crest before constructing the eight-neighbour edge to
+            # retain the barrier interpretation without 65 full-resolution
+            # shifts per forward pass. This introduces no trainable parameters
+            # and preserves the checkpoint schema.
+            invalid_fill = torch.finfo(physical["dsm_elevation"].dtype).min
+            dsm_crest = F.adaptive_max_pool2d(
+                torch.where(
+                    dem_full > 0.5,
+                    physical["dsm_elevation"],
+                    torch.full_like(physical["dsm_elevation"], invalid_fill),
+                ),
+                size,
+            )
+            dsm_crest = torch.where(
+                dem_fraction > 0.0, dsm_crest, torch.zeros_like(dsm_crest)
+            )
+            ground = _masked_pool(physical["z_ground_proxy"], dem_full, size)
+            neighbour_crest, boundary = self._stack_roll(dsm_crest)
+            neighbour_ground, _ = self._stack_roll(ground)
+            path_barrier = F.relu(
+                torch.maximum(dsm_crest.unsqueeze(1), neighbour_crest)
+                - torch.maximum(ground.unsqueeze(1), neighbour_ground)
+            )
+            pooled_valid = (dem_fraction > 0.5).to(dem_fraction.dtype)
+            neighbour_valid, _ = self._stack_roll(pooled_valid)
+            path_valid = pooled_valid.unsqueeze(1) * neighbour_valid * boundary
         relief_pair = 0.5 * (relief.unsqueeze(1) + neighbour_relief)
         distance_normalized = (
             distance / max(self.graph_pixel_size_m, 1.0)
@@ -273,15 +314,24 @@ class HydroEdgeKAN(nn.Module):
             [self._stack_roll(latent[:, head])[0] for head in range(self.heads)], dim=2
         )
         neighbour_features, _ = self._stack_roll(features)
+        collect_diagnostics = self.training or self.diagnostic_mode
         messages, affinities, gates = [], [], []
         compatibilities, kan_logits, base_outputs, spline_outputs = [], [], [], []
         prior = -(raw * self.prior_scales.view(1, 1, 6, 1, 1)).sum(dim=2, keepdim=True)
         flat_descriptor = descriptor.permute(0, 1, 3, 4, 2).reshape(-1, 6)
         for head, layer in enumerate(self.edge_kan):
-            residual, base, spline = layer.forward_with_contributions(flat_descriptor)
+            if collect_diagnostics:
+                residual, base, spline = layer.forward_with_contributions(
+                    flat_descriptor
+                )
+            else:
+                residual = layer(flat_descriptor)
+                base = spline = None
             residual = residual.reshape(features.shape[0], len(DIRECTIONS), 1, *size)
-            base = base.reshape(features.shape[0], len(DIRECTIONS), 1, *size)
-            spline = spline.reshape(features.shape[0], len(DIRECTIONS), 1, *size)
+            if collect_diagnostics:
+                assert base is not None and spline is not None
+                base = base.reshape(features.shape[0], len(DIRECTIONS), 1, *size)
+                spline = spline.reshape(features.shape[0], len(DIRECTIONS), 1, *size)
             total = prior + self.prior_bias[head] + residual
             topographic_affinity = torch.sigmoid(total)
             affinity = topographic_affinity * valid_edge
@@ -302,16 +352,28 @@ class HydroEdgeKAN(nn.Module):
             weighted = (gate * message).sum(1, keepdim=True) / denominator
             confidence_weight = gate.sum(1, keepdim=True) / valid_edge.sum(1, keepdim=True).clamp_min(1.0)
             messages.append(weighted.squeeze(1) * confidence_weight.squeeze(1) * self.gamma[head])
-            affinities.append(topographic_affinity)
-            gates.append(gate)
-            compatibilities.append(compatibility)
-            kan_logits.append(residual)
-            base_outputs.append(base)
-            spline_outputs.append(spline)
+            if collect_diagnostics:
+                affinities.append(topographic_affinity)
+                gates.append(gate)
+                compatibilities.append(compatibility)
+                kan_logits.append(residual)
+                base_outputs.append(base)
+                spline_outputs.append(spline)
         update = self.output(torch.cat(messages, dim=1))
         output = features + update
         coefficient_magnitude, coefficient_smoothness = self.spline_regularization()
         monotonicity, curve_smoothness, monotonicity_diagnostics = self.function_regularization()
+        if not collect_diagnostics:
+            diagnostics = {
+                "kan_coefficient_magnitude": coefficient_magnitude,
+                "kan_coefficient_smoothness": coefficient_smoothness,
+                "kan_monotonicity": monotonicity,
+                "kan_curve_smoothness": curve_smoothness,
+                "gamma_mean": self.gamma.mean(),
+                "graph_gamma_mean": self.gamma.mean(),
+                **monotonicity_diagnostics,
+            }
+            return output, diagnostics
         gate_stack = torch.cat(gates, dim=2)
         affinity_stack = torch.cat(affinities, dim=2)
         compatibility_stack = torch.cat(compatibilities, dim=2)

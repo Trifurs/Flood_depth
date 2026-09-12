@@ -1,0 +1,15 @@
+<config>
+  <include path="../pa_hydrokan.xml" />
+  <run_name type="str">pa_hydrokan_wo_rcp_tae_kan</run_name>
+  <model>
+    <reliability_conditioning_enabled type="bool">false</reliability_conditioning_enabled>
+    <topographic_affinity_enabled type="bool">false</topographic_affinity_enabled>
+  </model>
+  <ablation>
+    <variant_id type="str">wo_rcp_tae_kan</variant_id>
+    <display_name type="str">PA-HydroKAN w/o RCP + TAE-KAN</display_name>
+    <sequence_step type="int">5</sequence_step>
+    <removed_modules type="list" item_type="str"><item>RCP</item><item>TAE-KAN</item></removed_modules>
+    <training_rule type="str">factorial_removal_retrain_from_scratch_with_matched_protocol</training_rule>
+  </ablation>
+</config>

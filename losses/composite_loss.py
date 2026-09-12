@@ -9,8 +9,16 @@ import torch
 from torch import nn
 
 from losses.depth_losses import (
+    depth_bin_macro_root_mean_square,
+    event_depth_hierarchical_macro_mean,
+    event_depth_hierarchical_macro_root_mean_square,
+    event_depth_hierarchical_bias_loss,
+    event_mean_bias_loss,
+    event_macro_masked_mean,
+    event_macro_root_mean_square,
     event_depth_exceedance_loss,
     laplace_nll_loss,
+    masked_micro_mean,
     positive_depth_losses,
     tail_underprediction_loss,
 )
@@ -186,6 +194,101 @@ class CompositeFloodDepthLoss(nn.Module):
             frozen_depth_balance=self.frozen_depth_balance,
             log_beta=float(self.config.get("log_depth_huber_beta", 1.0)),
         )
+        # Optional metric-alignment terms preserve the robust task-adaptive
+        # objective while exposing the three deployment views used for model
+        # selection.  In particular, direct RMSE optimization gives rare large
+        # errors a proportional gradient without the unbounded scale of a raw
+        # sum-of-squares objective, and event MAE prevents large tiled events
+        # from monopolizing every update.
+        absolute_error = (prediction - label).abs()
+        squared_error = (prediction - label).square()
+        metric_pixel_mae = masked_micro_mean(absolute_error, positive)
+        metric_pixel_mse = masked_micro_mean(squared_error, positive)
+        metric_pixel_rmse = torch.sqrt(metric_pixel_mse.clamp_min(1.0e-12))
+        metric_event_mae = event_macro_masked_mean(
+            absolute_error, positive, _event_ids(batch)
+        )
+        metric_event_rmse = event_macro_root_mean_square(
+            prediction - label, positive, _event_ids(batch)
+        )
+        metric_event_hierarchical_mae = event_depth_hierarchical_macro_mean(
+            absolute_error,
+            label,
+            positive,
+            _event_ids(batch),
+            self.primary_depth_bins,
+            self.train_depth_bins,
+        )
+        metric_depth_bin_rmse = depth_bin_macro_root_mean_square(
+            prediction - label,
+            label,
+            positive,
+            self.train_depth_bins,
+        )
+        metric_event_hierarchical_rmse = (
+            event_depth_hierarchical_macro_root_mean_square(
+                prediction - label,
+                label,
+                positive,
+                _event_ids(batch),
+                self.primary_depth_bins,
+                self.train_depth_bins,
+            )
+        )
+        components["metric_pixel_mae"] = metric_pixel_mae
+        components["metric_pixel_rmse"] = metric_pixel_rmse
+        components["metric_event_mae"] = metric_event_mae
+        components["metric_event_rmse"] = metric_event_rmse
+        components["metric_event_hierarchical_mae"] = (
+            metric_event_hierarchical_mae
+        )
+        components["metric_depth_bin_rmse"] = metric_depth_bin_rmse
+        components["metric_event_hierarchical_rmse"] = (
+            metric_event_hierarchical_rmse
+        )
+        if float(self.config.get("lambda_depth_bias", 0.0)) != 0.0:
+            bias_beta = float(self.config.get("depth_bias_beta_m", 0.1))
+            bias_reduction = str(
+                self.config.get("depth_bias_reduction", "pixel_micro")
+            )
+            if bias_reduction == "pixel_micro":
+                signed_bias = masked_micro_mean(prediction - label, positive)
+                components["depth_bias"] = torch.nn.functional.smooth_l1_loss(
+                    signed_bias,
+                    torch.zeros_like(signed_bias),
+                    beta=bias_beta,
+                )
+            elif bias_reduction == "sample_macro":
+                components["depth_bias"] = event_mean_bias_loss(
+                    prediction,
+                    label,
+                    positive,
+                    None,
+                    beta=bias_beta,
+                )
+            elif bias_reduction == "event_macro":
+                components["depth_bias"] = event_mean_bias_loss(
+                    prediction,
+                    label,
+                    positive,
+                    _event_ids(batch),
+                    beta=bias_beta,
+                )
+            elif bias_reduction == "event_depth_hierarchical":
+                components["depth_bias"] = event_depth_hierarchical_bias_loss(
+                    prediction,
+                    label,
+                    positive,
+                    _event_ids(batch),
+                    self.primary_depth_bins,
+                    self.train_depth_bins,
+                    bias_beta,
+                )
+            else:
+                raise ValueError(
+                    "depth_bias_reduction must be pixel_micro, sample_macro, "
+                    "event_macro, or event_depth_hierarchical"
+                )
         exceedance = (
             event_depth_exceedance_loss(
                 outputs["depth"], label, positive, events, self.train_depth_bins,
@@ -377,6 +480,24 @@ class CompositeFloodDepthLoss(nn.Module):
         components["kan_curve_smoothness"] = outputs.get("graph_diagnostics", {}).get("kan_curve_smoothness", zero)
         total = (
             float(self.config["lambda_depth"]) * components["depth"]
+            + float(self.config.get("lambda_metric_pixel_mae", 0.0))
+            * metric_pixel_mae
+            + float(self.config.get("lambda_metric_pixel_rmse", 0.0))
+            * metric_pixel_rmse
+            + float(self.config.get("lambda_metric_event_mae", 0.0))
+            * metric_event_mae
+            + float(self.config.get("lambda_metric_event_rmse", 0.0))
+            * metric_event_rmse
+            + float(
+                self.config.get("lambda_metric_event_hierarchical_mae", 0.0)
+            )
+            * metric_event_hierarchical_mae
+            + float(self.config.get("lambda_metric_depth_bin_rmse", 0.0))
+            * metric_depth_bin_rmse
+            + float(
+                self.config.get("lambda_metric_event_hierarchical_rmse", 0.0)
+            )
+            * metric_event_hierarchical_rmse
             + float(self.config.get("lambda_depth_bias", 0.0))
             * components["depth_bias"]
             + float(self.config.get("lambda_depth_exceedance", 0.0)) * exceedance

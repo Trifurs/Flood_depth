@@ -48,6 +48,7 @@ from losses.frozen_soft_depth_balance import FrozenSoftDepthBalance
 from tools.evaluate_pa_hydrokan import dataset_fingerprint, embed_source_fingerprints, evaluate_loader
 from utils.checkpoint import (
     checkpoint_depth_output_semantics,
+    initialize_from_checkpoint,
     load_checkpoint,
     save_checkpoint,
     training_identity_sha256,
@@ -323,10 +324,17 @@ def create_dataloaders(
         s1_qa_names=config["dataset"].get("model_s1_qa_names"),
     )
     replacement = bool(config["dataset"]["sampling"].get("replacement", False))
+    balance_power = float(
+        config["dataset"]["sampling"].get("event_balance_power", 1.0)
+    )
     if world_size > 1:
         sampler: Any = (
             DistributedEventBalancedSampler(
-                train_dataset.event_ids, world_size, rank, int(config["seed"])
+                train_dataset.event_ids,
+                world_size,
+                rank,
+                int(config["seed"]),
+                balance_power,
             )
             if replacement
             else DistributedEventEpochSampler(
@@ -335,7 +343,9 @@ def create_dataloaders(
         )
     else:
         sampler = (
-            make_event_balanced_sampler(train_dataset.event_ids, int(config["seed"]))
+            make_event_balanced_sampler(
+                train_dataset.event_ids, int(config["seed"]), balance_power
+            )
             if replacement
             else EventEpochSampler(train_dataset.event_ids, int(config["seed"]))
         )
@@ -902,25 +912,117 @@ def run_training(args: argparse.Namespace) -> Path:
         )
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
     LOGGER.info("Train depth bins: %s", depth_bins)
+    selection_depth_mode = str(
+        config["training"].get("selection_depth_stratification", "objective")
+    )
+    if selection_depth_mode == "objective":
+        selection_depth_bins = depth_bins
+    elif selection_depth_mode == "primary":
+        selection_depth_bins = normalizer.train_depth_bins
+    else:
+        raise ValueError(
+            "training.selection_depth_stratification must be objective or primary"
+        )
+    if selection_depth_bins != depth_bins:
+        LOGGER.info(
+            "Checkpoint selection uses common primary depth bins: %s",
+            selection_depth_bins,
+        )
 
     amp_enabled, amp_dtype, scaler_enabled = resolve_amp(
         device, bool(config["training"]["amp"]),
         str(config["training"].get("amp_dtype", "float16")),
     )
     model = build_model(config).to(device)
+    fingerprint = dataset_fingerprint(config)
     parent_checkpoint = None
+    initialization_transfer = None
     if args.init_checkpoint is not None:
         parent_checkpoint = args.init_checkpoint.resolve()
-        init_payload = load_checkpoint(
-            parent_checkpoint, model, map_location=device,
-            adopt_checkpoint_output_semantics=True,
+        init_payload, initialization_transfer = initialize_from_checkpoint(
+            parent_checkpoint,
+            model,
+            weights=args.init_weights,
+            transfer=getattr(args, "init_transfer", "strict"),
+            expected_fingerprint=fingerprint,
+            map_location=device,
         )
-        if args.init_weights == "ema" and init_payload.get("ema_model") is not None:
-            model.load_state_dict(init_payload["ema_model"], strict=True)
-        elif args.init_weights == "ema":
+        if args.init_weights == "ema" and initialization_transfer["weights"] != "ema":
             LOGGER.warning(
                 "init checkpoint has no EMA state; initializing the new stage from raw weights"
             )
+        LOGGER.info(
+            "Initialized from %s weights | transfer=%s | loaded=%.2f%%",
+            initialization_transfer["weights"],
+            initialization_transfer["transfer"],
+            100.0 * float(initialization_transfer["loaded_parameter_fraction"]),
+        )
+    trainable_scope = str(
+        config.get("runtime", {}).get("train", {}).get("trainable_scope", "all")
+    )
+    supported_trainable_scopes = {
+        "all",
+        "new_adapters",
+        "depth_head",
+        "decoder_and_depth_head",
+        "refinement_adapters",
+        "refinement_and_depth_head",
+        "global_depth_calibration",
+    }
+    if trainable_scope not in supported_trainable_scopes:
+        raise ValueError(
+            "runtime.train.trainable_scope must be one of "
+            f"{sorted(supported_trainable_scopes)}"
+        )
+    if trainable_scope == "new_adapters":
+        if not isinstance(initialization_transfer, Mapping):
+            raise ValueError(
+                "new_adapters training requires a compatible init checkpoint"
+            )
+        adapter_names = set(initialization_transfer.get("new_tensors", ()))
+        for parameter_name, parameter in model.named_parameters():
+            parameter.requires_grad_(parameter_name in adapter_names)
+        if not any(parameter.requires_grad for parameter in model.parameters()):
+            raise ValueError("compatible initialization exposed no new adapter parameters")
+        LOGGER.info(
+            "Training only %d newly initialized adapter tensors; transferred weights are frozen",
+            sum(parameter.requires_grad for parameter in model.parameters()),
+        )
+    elif trainable_scope in {
+        "depth_head",
+        "decoder_and_depth_head",
+        "refinement_adapters",
+        "refinement_and_depth_head",
+        "global_depth_calibration",
+    }:
+        if trainable_scope == "depth_head":
+            prefixes = ("heads.depth_head.",)
+        elif trainable_scope == "decoder_and_depth_head":
+            prefixes = ("decoder.", "heads.depth_head.")
+        elif trainable_scope == "refinement_adapters":
+            prefixes = (
+                "global_depth_calibration_adapter.",
+                "heads.depth_range_calibration.",
+            )
+        elif trainable_scope == "refinement_and_depth_head":
+            prefixes = (
+                "global_depth_calibration_adapter.",
+                "heads.depth_range_calibration.",
+                "heads.depth_head.",
+            )
+        else:
+            prefixes = ("global_depth_calibration_adapter.",)
+        for parameter_name, parameter in model.named_parameters():
+            parameter.requires_grad_(parameter_name.startswith(prefixes))
+        if not any(parameter.requires_grad for parameter in model.parameters()):
+            raise ValueError(
+                f"trainable scope {trainable_scope!r} selected no model parameters"
+            )
+        LOGGER.info(
+            "Fine-tuning scope=%s | trainable tensors=%d; all other tensors are frozen",
+            trainable_scope,
+            sum(parameter.requires_grad for parameter in model.parameters()),
+        )
     if rank == 0 and isinstance(calibration_payload.get("depth_initialization"), Mapping):
         initialization = dict(calibration_payload["depth_initialization"])
         initialization.update(
@@ -970,7 +1072,6 @@ def run_training(args: argparse.Namespace) -> Path:
         config["loss"], depth_bins, normalizer.train_depth_bins,
         normalizer.train_depth_bin_counts, frozen_depth_balance,
     )
-    fingerprint = dataset_fingerprint(config)
     monitor = str(config["training"]["best_metric"])
     start_epoch, best_metric, patience = 0, float("inf"), 0
     best_epoch = -1
@@ -1080,6 +1181,7 @@ def run_training(args: argparse.Namespace) -> Path:
                 "epochs": epochs,
                 "batch_size": config["training"]["batch_size"],
                 "best_metric": monitor,
+                "trainable_scope": trainable_scope,
             },
         )
         atomic_write_json(run_dir / "resolved_config.json", jsonable_config(config))
@@ -1092,7 +1194,11 @@ def run_training(args: argparse.Namespace) -> Path:
         }
         if parent_checkpoint is not None:
             run_metadata.update(
-                {"parent_checkpoint": str(parent_checkpoint), "init_weights": args.init_weights}
+                {
+                    "parent_checkpoint": str(parent_checkpoint),
+                    "init_weights": args.init_weights,
+                    "initialization_transfer": initialization_transfer,
+                }
             )
         atomic_write_json(run_dir / "run_metadata.json", run_metadata)
         atomic_write_json(
@@ -1107,6 +1213,7 @@ def run_training(args: argparse.Namespace) -> Path:
                 "best_metric": monitor,
                 "depth_stratification_edges_m": depth_bins,
                 "primary_depth_stratification_edges_m": normalizer.train_depth_bins,
+                "selection_depth_stratification_edges_m": selection_depth_bins,
                 "resolved_model_bands": config["dataset"].get("resolved_model_bands"),
                 "amp_dtype": str(amp_dtype),
                 "graph_identity": resolved_graph_identity(config),
@@ -1242,7 +1349,7 @@ def run_training(args: argparse.Namespace) -> Path:
                     evaluation_model,
                     val_loader,
                     device,
-                    depth_bins,
+                    selection_depth_bins,
                     primary_depth_bins=normalizer.train_depth_bins,
                     criterion=criterion,
                     epoch=epoch,
@@ -1255,7 +1362,7 @@ def run_training(args: argparse.Namespace) -> Path:
                 if ema is not None:
                     with ema.swap_in(model):
                         ema_summary, _, _, _ = evaluate_loader(
-                            evaluation_model, val_loader, device, depth_bins,
+                            evaluation_model, val_loader, device, selection_depth_bins,
                             primary_depth_bins=normalizer.train_depth_bins,
                             criterion=criterion, epoch=epoch,
                             max_batches=args.max_val_batches,

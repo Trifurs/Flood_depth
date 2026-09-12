@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from itertools import islice
 from pathlib import Path
 import sys
 import time
@@ -28,6 +29,7 @@ from datasets.preprocessing import RobustNormalizer, resolve_depth_stratificatio
 from datasets.supervision_masks import canonical_positive_mask_from_batch
 from metrics.aggregator import EvaluationAggregator
 from utils.config import jsonable_config
+from utils.efficiency import InferenceEfficiency
 from utils.logging import format_duration, setup_logging, write_rows
 from utils.misc import atomic_write_json
 from utils.raster_io import write_geotiff
@@ -95,6 +97,7 @@ def run_model(
     normalizer = RobustNormalizer(Path(config["dataset"]["train_stats"]), dataset.contract)
     depth_bins = resolve_depth_stratification_bins(config["loss"], normalizer)
     aggregator = EvaluationAggregator(depth_bins, primary_depth_bins=normalizer.train_depth_bins)
+    efficiency = InferenceEfficiency(torch.device("cpu"))
     atomic_write_json(output / "resolved_config.json", jsonable_config(config))
     progress = bool(config["logging"].get("progress_bar", False))
     disable_progress = not progress or os.environ.get("FLOOD_DEPTH_DISABLE_TQDM", "").lower() in {
@@ -102,11 +105,17 @@ def run_model(
         "true",
         "yes",
     }
+    selected_batches = loader if max_batches is None else islice(loader, max_batches)
+    progress_total = len(loader) if max_batches is None else min(len(loader), max_batches)
     for batch_index, batch in enumerate(
-        tqdm(loader, desc=f"{method} {split}", leave=False, disable=disable_progress)
+        tqdm(
+            selected_batches,
+            total=progress_total,
+            desc=f"{method} {split}",
+            leave=False,
+            disable=disable_progress,
+        )
     ):
-        if max_batches is not None and batch_index >= max_batches:
-            break
         metadata = batch["metadata"]
         valid = canonical_positive_mask_from_batch(batch)[0, 0].numpy() > 0.5
         terrain = batch["terrain_raw"][0, 0].numpy().astype(np.float64)
@@ -116,7 +125,13 @@ def run_model(
         sample_id = str(_metadata_item(metadata, "sample_id"))
         event_id = str(_metadata_item(metadata, "source_event_id"))
         label_path = Path(str(_metadata_item(metadata, "label_path")))
+        inference_started = efficiency.start()
         prediction = estimator(support, terrain)
+        efficiency.stop(
+            inference_started,
+            samples=1,
+            output_pixels=int(prediction.size),
+        )
         aggregator.add(sample_id, event_id, prediction, target, np.ones_like(prediction), valid)
         if save_predictions:
             with rasterio.open(label_path) as reference:
@@ -126,7 +141,19 @@ def run_model(
                     valid_mask=output_valid, descriptions=("predicted_depth_m",),
                 )
     summary, samples, events, bins = aggregator.summarize()
-    summary = {"method": method, "flood_support": FLOOD_SUPPORT, **summary}
+    summary = {
+        "method": method,
+        "model_family": "traditional",
+        "flood_support": FLOOD_SUPPORT,
+        "total_parameters": 0,
+        "trainable_parameters": 0,
+        "parameter_storage_mib": 0.0,
+        "buffer_storage_mib": 0.0,
+        "efficiency_precision": "float64_numpy",
+        **summary,
+        **efficiency.summary(),
+    }
+    summary["efficiency_end_to_end_seconds"] = float(time.perf_counter() - started)
     write_rows(output / "metrics_by_sample.csv", samples)
     write_rows(output / "metrics_by_event.csv", events)
     write_rows(output / "metrics_by_train_depth_bin.csv", bins)
@@ -155,4 +182,4 @@ def run_model(
 
 
 if __name__ == "__main__":
-    raise SystemExit("Use `python train.py <model-config.xml>` from the project root.")
+    raise SystemExit("Use `python test.py <training-runs-directory>` from the project root.")

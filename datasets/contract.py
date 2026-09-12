@@ -82,7 +82,14 @@ class DatasetContract:
 
     @property
     def manifest_path(self) -> Path:
-        relative = Path(str(self.payload["manifest"]["relative_path"]))
+        manifest = self.payload["manifest"]
+        explicit = manifest.get("path")
+        if explicit is not None:
+            path = Path(str(explicit)).expanduser()
+            if not path.is_absolute():
+                path = self.path.parent / path
+            return path.resolve(strict=True)
+        relative = Path(str(manifest["relative_path"]))
         return ensure_within(self.dataset_root / relative, self.dataset_root)
 
     @property

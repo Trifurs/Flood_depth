@@ -24,6 +24,41 @@ def _masked_mean(values: torch.Tensor, valid: torch.Tensor, kernel_size: int) ->
     return numerator / denominator.clamp_min(1e-6)
 
 
+def _masked_multiscale_position(
+    elevation: torch.Tensor,
+    valid: torch.Tensor,
+    pixel_size_m: float,
+    scales_m: Sequence[float],
+) -> list[torch.Tensor]:
+    """Return bounded depression/height indices at progressively wider scales.
+
+    Coarse masked moments are computed on physically defined cells and then
+    interpolated back to the raster grid.  This supplies catchment-scale context
+    without the quadratic cost of very large sliding-window kernels.  Positive
+    values denote locations below their surrounding mean elevation.
+    """
+
+    height, width = elevation.shape[-2:]
+    outputs: list[torch.Tensor] = []
+    for scale_m in scales_m:
+        scale_pixels = max(1, int(round(float(scale_m) / float(pixel_size_m))))
+        grid = (
+            max(1, (height + scale_pixels - 1) // scale_pixels),
+            max(1, (width + scale_pixels - 1) // scale_pixels),
+        )
+        fraction = F.adaptive_avg_pool2d(valid, grid)
+        first = F.adaptive_avg_pool2d(elevation * valid, grid) / fraction.clamp_min(1e-6)
+        second = F.adaptive_avg_pool2d(elevation.square() * valid, grid) / fraction.clamp_min(1e-6)
+        standard_deviation = (second - first.square()).clamp_min(0.0).sqrt()
+        mean = F.interpolate(first, (height, width), mode="bilinear", align_corners=False)
+        spread = F.interpolate(
+            standard_deviation, (height, width), mode="bilinear", align_corners=False
+        )
+        position = torch.tanh((mean - elevation) / (spread + 1.0)) * valid
+        outputs.append(position)
+    return outputs
+
+
 def _masked_min(values: torch.Tensor, valid: torch.Tensor, kernel_size: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Return a finite local minimum and whether a valid value was present."""
 
@@ -107,27 +142,98 @@ def path_barrier_proxy(
     valid = (valid > 0.5).to(elevation.dtype)
     ground = elevation if ground is None else ground
     outputs, valids = [], []
+    # A path and its reverse contain the same elevation samples.  Compute one
+    # orientation explicitly and obtain the opposite orientation by a bounded
+    # shift.  For the standard eight-neighbour graph this halves the expensive
+    # full-resolution path construction without changing a single descriptor.
+    path_cache: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
     fractions = torch.linspace(0.0, 1.0, pixel_step + 1, device=elevation.device, dtype=elevation.dtype)
     for dy, dx in dirs:
-        samples, sample_valid = [], []
-        for fraction in fractions:
-            offset_y = int(round(float(dy) * float(pixel_step) * float(fraction)))
-            offset_x = int(round(float(dx) * float(pixel_step) * float(fraction)))
-            shifted = torch.roll(elevation, shifts=(offset_y, offset_x), dims=(-2, -1))
+        opposite = path_cache.get((-dy, -dx))
+        if opposite is None:
+            if statistic == "max" and (dy == 0) != (dx == 0):
+                # Horizontal and vertical paths are one-sided sliding windows;
+                # one pooling kernel replaces ``pixel_step + 1`` shifts.
+                pad = (
+                    pixel_step if dx > 0 else 0,
+                    pixel_step if dx < 0 else 0,
+                    pixel_step if dy > 0 else 0,
+                    pixel_step if dy < 0 else 0,
+                )
+                kernel = (
+                    pixel_step + 1 if dy else 1,
+                    pixel_step + 1 if dx else 1,
+                )
+                invalid_fill = torch.finfo(elevation.dtype).min
+                filled = torch.where(
+                    valid > 0.5,
+                    elevation,
+                    torch.full_like(elevation, invalid_fill),
+                )
+                crest = F.max_pool2d(
+                    F.pad(filled, pad, value=invalid_fill), kernel, stride=1
+                )
+                count = F.avg_pool2d(
+                    F.pad(valid, pad, value=0.0),
+                    kernel,
+                    stride=1,
+                    divisor_override=1,
+                )
+                path_valid = (count >= float(pixel_step + 1)).to(valid.dtype)
+            else:
+                samples, sample_valid = [], []
+                for fraction in fractions:
+                    offset_y = int(round(float(dy) * float(pixel_step) * float(fraction)))
+                    offset_x = int(round(float(dx) * float(pixel_step) * float(fraction)))
+                    shifted = torch.roll(elevation, shifts=(offset_y, offset_x), dims=(-2, -1))
+                    boundary = torch.ones_like(valid)
+                    if offset_y > 0: boundary[..., :offset_y, :] = 0
+                    elif offset_y < 0: boundary[..., offset_y:, :] = 0
+                    if offset_x > 0: boundary[..., :, :offset_x] = 0
+                    elif offset_x < 0: boundary[..., :, offset_x:] = 0
+                    samples.append(shifted)
+                    # ``torch.roll`` samples the source at ``(p - offset)``.  The
+                    # validity mask must follow the same sampling path.
+                    sample_valid.append(
+                        torch.roll(valid, shifts=(offset_y, offset_x), dims=(-2, -1))
+                        * boundary
+                    )
+                values = torch.stack(samples, dim=1)
+                stacked_valid = torch.stack(sample_valid, dim=1)
+                path_valid = stacked_valid.prod(dim=1)
+                values = torch.where(
+                    stacked_valid > 0.5,
+                    values,
+                    torch.full_like(values, torch.finfo(values.dtype).min),
+                )
+                crest = (
+                    values.max(dim=1).values
+                    if statistic == "max"
+                    else torch.quantile(
+                        values.masked_fill(path_valid.unsqueeze(1) < 0.5, 0.0),
+                        quantile,
+                        dim=1,
+                    )
+                )
+        else:
+            opposite_crest, opposite_valid = opposite
+            offset_y, offset_x = dy * pixel_step, dx * pixel_step
+            crest = torch.roll(
+                opposite_crest,
+                shifts=(offset_y, offset_x),
+                dims=(-2, -1),
+            )
             boundary = torch.ones_like(valid)
             if offset_y > 0: boundary[..., :offset_y, :] = 0
             elif offset_y < 0: boundary[..., offset_y:, :] = 0
             if offset_x > 0: boundary[..., :, :offset_x] = 0
             elif offset_x < 0: boundary[..., :, offset_x:] = 0
-            samples.append(shifted)
-            # ``torch.roll`` samples the source at ``(p - offset)``.  The
-            # validity mask must follow the same sampling path; checking the
-            # unshifted mask would validate only the starting pixel repeatedly.
-            sample_valid.append(torch.roll(valid, shifts=(offset_y, offset_x), dims=(-2, -1)) * boundary)
-        values = torch.stack(samples, dim=1)
-        path_valid = torch.stack(sample_valid, dim=1).prod(dim=1)
-        values = torch.where(torch.stack(sample_valid, dim=1) > 0.5, values, torch.full_like(values, torch.finfo(values.dtype).min))
-        crest = values.max(dim=1).values if statistic == "max" else torch.quantile(values.masked_fill(path_valid.unsqueeze(1) < 0.5, 0.0), quantile, dim=1)
+            path_valid = torch.roll(
+                opposite_valid,
+                shifts=(offset_y, offset_x),
+                dims=(-2, -1),
+            ) * boundary
+        path_cache[(dy, dx)] = (crest, path_valid)
         neighbour_ground = torch.roll(ground, shifts=(dy * pixel_step, dx * pixel_step), dims=(-2, -1))
         barrier = F.relu(crest - torch.maximum(ground, neighbour_ground))
         endpoint_valid = valid * path_valid * torch.roll(valid, shifts=(dy * pixel_step, dx * pixel_step), dims=(-2, -1))
@@ -144,6 +250,7 @@ class TerrainFeaturePyramid(nn.Module):
         pixel_size_m: float, terrain_band_names: Sequence[str],
         ground_proxy_kernel_size: int = 9, physics_elevation: str = "z_ground_proxy",
         block_kind: str = "efficient",
+        topographic_context_scales_m: Sequence[float] | None = None,
     ) -> None:
         super().__init__()
         if pixel_size_m <= 0:
@@ -161,10 +268,30 @@ class TerrainFeaturePyramid(nn.Module):
         self.slope_index = names.index("slope_deg") if "slope_deg" in names else None
         self.ground_proxy_kernel_size = int(ground_proxy_kernel_size)
         self.physics_elevation = physics_elevation
+        self.topographic_context_scales_m = tuple(
+            float(value) for value in (topographic_context_scales_m or ())
+        )
+        if any(value <= 0.0 for value in self.topographic_context_scales_m):
+            raise ValueError("topographic context scales must be positive")
+        if tuple(sorted(set(self.topographic_context_scales_m))) != self.topographic_context_scales_m:
+            raise ValueError("topographic context scales must be strictly increasing")
         self.stem = nn.Sequential(
             ConvNormAct(input_channels + 8, channels[0], 3, groups=groups),
             residual_block(block_kind, channels[0], dropout, groups),
         )
+        self.context_adapter = (
+            nn.Conv2d(
+                len(self.topographic_context_scales_m),
+                channels[0],
+                3,
+                padding=1,
+                bias=False,
+            )
+            if self.topographic_context_scales_m
+            else None
+        )
+        if self.context_adapter is not None:
+            nn.init.zeros_(self.context_adapter.weight)
         self.down = nn.ModuleList([
             nn.Sequential(ConvNormAct(channels[i - 1], channels[i], 3, 2, groups), residual_block(block_kind, channels[i], dropout, groups))
             for i in range(1, len(channels))
@@ -191,8 +318,30 @@ class TerrainFeaturePyramid(nn.Module):
         else:
             slope_for_features = slope * valid
         scale = relief + 1.0
-        base = torch.cat((normalized, torch.tanh(relative / scale), torch.tanh(obstacle / scale), torch.tanh(gx), torch.tanh(gy), torch.log1p(relief) / 5.0, torch.tanh(derived_slope), gx_valid * gy_valid, valid), dim=1) * valid
-        features = [self.stem(base) * valid]
+        context_positions = _masked_multiscale_position(
+            elevation,
+            valid,
+            self.pixel_size_m,
+            self.topographic_context_scales_m,
+        )
+        base = torch.cat(
+            (
+                normalized,
+                torch.tanh(relative / scale),
+                torch.tanh(obstacle / scale),
+                torch.tanh(gx),
+                torch.tanh(gy),
+                torch.log1p(relief) / 5.0,
+                torch.tanh(derived_slope),
+                gx_valid * gy_valid,
+                valid,
+            ),
+            dim=1,
+        ) * valid
+        stem = self.stem(base)
+        if self.context_adapter is not None:
+            stem = stem + self.context_adapter(torch.cat(context_positions, dim=1))
+        features = [stem * valid]
         fractions = [valid]
         for layer in self.down:
             features.append(layer(features[-1]))
@@ -218,5 +367,6 @@ class TerrainFeaturePyramid(nn.Module):
             "dem_valid": valid,
             "dem_valid_fractions": fractions,
             "terrain_valid": valid,
+            "topographic_context_positions": context_positions,
         }
         return features, physical

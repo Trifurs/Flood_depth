@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from itertools import islice
 import os
 from pathlib import Path
 import sys
-from typing import Any
+import time
+from typing import Any, Mapping
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -59,10 +62,19 @@ from metrics.physical_metrics import (
 )
 from utils.checkpoint import load_checkpoint
 from utils.config import jsonable_config, load_config
+from utils.efficiency import (
+    InferenceEfficiency,
+    checkpoint_size_metrics,
+    model_size_metrics,
+)
 from utils.logging import write_rows
-from utils.misc import atomic_write_json, move_to_device
+from utils.misc import (
+    atomic_write_json,
+    move_to_device,
+)
 from utils.raster_io import write_geotiff
 from utils.registry import build_model
+from utils.spatial_tta import spatial_tta_forward
 
 
 def frozen_depth_balance_for_config(config: dict[str, Any]) -> FrozenSoftDepthBalance | None:
@@ -149,7 +161,7 @@ def metadata_item(value: Any, index: int) -> Any:
     return value
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def evaluate_loader(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -167,6 +179,10 @@ def evaluate_loader(
     amp_dtype: torch.dtype | None = None,
     input_spec: ModelInputSpec | None = None,
     validity_mask: str | None = None,
+    measure_efficiency: bool = False,
+    efficiency_warmup_batches: int | None = None,
+    progress_label: str = "Evaluate",
+    tta_transforms: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     model.eval()
     aggregator = EvaluationAggregator(train_depth_bins, primary_depth_bins)
@@ -179,27 +195,50 @@ def evaluate_loader(
         "positive_supervision_pixels": 0,
         "positive_excluded_by_output_valid_pixels": 0,
     }
+    efficiency = InferenceEfficiency(
+        device,
+        enabled=measure_efficiency,
+        warmup_batches=efficiency_warmup_batches,
+    )
     disable_progress = (not progress) or os.environ.get("FLOOD_DEPTH_DISABLE_TQDM", "").lower() in {
         "1",
         "true",
         "yes",
     }
-    iterator = tqdm(loader, desc="evaluate", leave=False, disable=disable_progress)
+    selected_batches = loader if max_batches is None else islice(loader, max_batches)
+    progress_total = len(loader) if max_batches is None else min(len(loader), max_batches)
+    iterator = tqdm(
+        selected_batches,
+        total=progress_total,
+        desc=progress_label,
+        leave=False,
+        disable=disable_progress,
+    )
     for batch_index, cpu_batch in enumerate(iterator):
-        if max_batches is not None and batch_index >= max_batches:
-            break
         batch = move_to_device(cpu_batch, device)
         batch_mask_counts = supervision_mask_counts(batch)
         for name in mask_totals:
             mask_totals[name] += int(batch_mask_counts[name].detach().cpu())
         reliability_names = _batch_reliability_names(cpu_batch)
         reliability_index = {name: index for index, name in enumerate(reliability_names)}
+        model_inputs = prepare_model_inputs(batch, input_spec)
+        inference_started = efficiency.start()
         with torch.autocast(
             device_type=device.type,
             enabled=amp_enabled and device.type == "cuda",
             dtype=amp_dtype,
         ):
-            outputs = model(prepare_model_inputs(batch, input_spec))
+            outputs = spatial_tta_forward(model, model_inputs, tta_transforms)
+        efficiency.stop(
+            inference_started,
+            samples=int(outputs["depth"].shape[0]),
+            output_pixels=int(outputs["depth"].numel()),
+        )
+        with torch.autocast(
+            device_type=device.type,
+            enabled=amp_enabled and device.type == "cuda",
+            dtype=amp_dtype,
+        ):
             if criterion is not None:
                 loss, components = criterion(outputs, batch, epoch)
                 loss_values.append(float(loss.detach().cpu()))
@@ -397,11 +436,15 @@ def evaluate_loader(
         summary["objective_mean"] = float(np.mean(loss_values))
         for name, values in component_values.items():
             summary[f"objective_{name}_mean"] = float(np.mean(values))
+    summary.update(efficiency.summary())
+    summary["spatial_tta_transforms"] = list(
+        outputs.get("spatial_tta_transforms", ("identity",))
+    )
     return summary, sample_rows, event_rows, bin_rows
 
 
-def run_evaluation(
-    config_path: Path,
+def run_evaluation_from_config(
+    config_value: Mapping[str, Any],
     checkpoint_path: Path,
     split: str,
     device_name: str,
@@ -412,7 +455,10 @@ def run_evaluation(
     validity_mask: str | None = None,
     num_workers: int | None = None,
 ) -> dict[str, Any]:
-    config = embed_source_fingerprints(load_config(config_path))
+    """Evaluate PA-HydroKAN from an immutable resolved training config."""
+
+    evaluation_started = time.perf_counter()
+    config = embed_source_fingerprints(deepcopy(dict(config_value)))
     if num_workers is not None:
         if num_workers < 0:
             raise ValueError("num_workers must be non-negative")
@@ -435,19 +481,30 @@ def run_evaluation(
         ),
         s1_qa_names=config["dataset"].get("model_s1_qa_names"),
     )
-    loader = DataLoader(
-        dataset,
-        batch_size=int(config["training"]["batch_size"]),
-        shuffle=False,
-        num_workers=int(config["training"]["num_workers"]),
-        persistent_workers=int(config["training"]["num_workers"]) > 0,
-    )
+    workers = int(config["training"]["num_workers"])
+    loader_options: dict[str, Any] = {
+        "batch_size": int(config["training"]["batch_size"]),
+        "shuffle": False,
+        "num_workers": workers,
+        "persistent_workers": bool(
+            config["training"].get("persistent_workers", False)
+        )
+        and workers > 0,
+        "pin_memory": device.type == "cuda",
+    }
+    if workers > 0:
+        loader_options["prefetch_factor"] = int(
+            config["training"].get("prefetch_factor", 2)
+        )
+    loader = DataLoader(dataset, **loader_options)
     model = build_model(config).to(device)
     checkpoint = load_checkpoint(
         checkpoint_path,
         model,
         expected_fingerprint=dataset_fingerprint(config),
-        map_location=device,
+        # Keep non-model checkpoint state (optimizer, RNG, scheduler) off the
+        # accelerator so peak memory describes inference rather than loading.
+        map_location="cpu",
     )
     if weights == "ema":
         ema_state = checkpoint.get("ema_model")
@@ -486,15 +543,70 @@ def run_evaluation(
         input_spec=input_spec,
         validity_mask=validity_mask or CANONICAL_POSITIVE_MASK,
         progress=bool(config["logging"].get("progress_bar", False)),
+        measure_efficiency=True,
+        efficiency_warmup_batches=int(
+            config.get("runtime", {}).get("test", {}).get(
+                "cuda_warmup_batches", 1
+            )
+        )
+        if device.type == "cuda"
+        else 0,
+        progress_label=split.capitalize(),
+        tta_transforms=config.get("inference", {}).get("tta_transforms"),
     )
     summary["checkpoint_epoch"] = checkpoint_epoch
     summary["weights"] = weights
+    summary["model_family"] = "deep_learning"
+    summary["efficiency_precision"] = (
+        str(
+            torch.bfloat16
+            if str(config["training"].get("amp_dtype", "auto"))
+            in {"auto", "bfloat16"}
+            and device.type == "cuda"
+            and torch.cuda.is_bf16_supported()
+            else torch.float16
+        ).replace("torch.", "")
+        if bool(config["training"].get("amp", False)) and device.type == "cuda"
+        else "float32"
+    )
+    summary["efficiency_memory_format"] = "contiguous"
+    summary.update(model_size_metrics(model))
+    summary.update(checkpoint_size_metrics(checkpoint_path))
+    summary["efficiency_end_to_end_seconds"] = float(
+        time.perf_counter() - evaluation_started
+    )
     atomic_write_json(output_dir / "summary.json", summary)
     atomic_write_json(output_dir / "resolved_config.json", jsonable_config(config))
     write_rows(output_dir / "metrics_by_sample.csv", samples)
     write_rows(output_dir / "metrics_by_event.csv", events)
     write_rows(output_dir / "metrics_by_train_depth_bin.csv", bins)
     return summary
+
+
+def run_evaluation(
+    config_path: Path,
+    checkpoint_path: Path,
+    split: str,
+    device_name: str,
+    output_dir: Path,
+    save_predictions: bool,
+    max_batches: int | None = None,
+    weights: str = "raw",
+    validity_mask: str | None = None,
+    num_workers: int | None = None,
+) -> dict[str, Any]:
+    return run_evaluation_from_config(
+        load_config(config_path),
+        checkpoint_path,
+        split,
+        device_name,
+        output_dir,
+        save_predictions,
+        max_batches,
+        weights,
+        validity_mask,
+        num_workers,
+    )
 
 
 if __name__ == "__main__":

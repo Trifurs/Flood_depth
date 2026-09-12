@@ -1,0 +1,14 @@
+<config>
+  <include path="../pa_hydrokan.xml" />
+  <run_name type="str">pa_hydrokan_wo_tcf</run_name>
+  <model>
+    <terrain_conditioned_fusion_enabled type="bool">false</terrain_conditioned_fusion_enabled>
+  </model>
+  <ablation>
+    <variant_id type="str">wo_tcf</variant_id>
+    <display_name type="str">PA-HydroKAN w/o TCF</display_name>
+    <sequence_step type="int">2</sequence_step>
+    <removed_modules type="list" item_type="str"><item>TCF</item></removed_modules>
+    <training_rule type="str">factorial_removal_retrain_from_scratch_with_matched_protocol</training_rule>
+  </ablation>
+</config>

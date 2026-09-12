@@ -156,6 +156,198 @@ def masked_two_way_change_mixer(
     return mixed, internal_weight, external_weight
 
 
+class JointSARHydrologyEncoder(nn.Module):
+    """Joint Temporal-Change SAR Encoder (TCSE).
+
+    The original decomposed TCSE evaluates three full feature pyramids for the
+    two temporal states, the supplied change product, and a fourth lightweight
+    detail representation.  That separation is useful when acquisitions are
+    frequently absent, but it is unnecessarily expensive for the audited
+    FloodDepthNet release where complete event observations are required.  This
+    encoder exposes the same downstream contract while learning joint spatial
+    filters from the states, signed/absolute temporal change, acquisition-angle
+    conditioning, and branch-validity indicators in one pyramid.
+
+    Reliability remains a distinct RCP feature pyramid and is injected through
+    learned observation gates at every scale.  Consequently, selecting this
+    encoder does not merge or invalidate the RCP ablation.
+    """
+
+    def __init__(
+        self,
+        state_channels: int,
+        change_channels: int,
+        channels: Sequence[int],
+        *,
+        dropout: float = 0.10,
+        groups: int = 8,
+        block_kind: str = "spatial",
+        conditioning_channels: int = 0,
+    ) -> None:
+        super().__init__()
+        widths = [int(value) for value in channels]
+        if len(widths) != 4 or any(value <= 0 for value in widths):
+            raise ValueError("JointSARHydrologyEncoder requires four positive scales")
+        if min(state_channels, change_channels) <= 0:
+            raise ValueError("S1 state and change channel counts must be positive")
+        self.widths = widths
+        self.state_channels = int(state_channels)
+        self.change_channels = int(change_channels)
+        self.conditioning_channels = int(conditioning_channels)
+        # pre + event + external change + signed/absolute internal change,
+        # optional acquisition angles, and four explicit availability maps.
+        input_channels = (
+            4 * self.state_channels
+            + self.change_channels
+            + self.conditioning_channels
+            + 4
+        )
+        self.pyramid = EfficientPyramidBranch(
+            input_channels, widths, dropout, groups, block_kind
+        )
+        self.change_projection = nn.ModuleList(
+            [
+                ConvNormAct(self.change_channels, width, 1, groups=groups)
+                for width in widths
+            ]
+        )
+        # Two scalar gates retain an interpretable distinction between
+        # observation quality and the amplitude of the RCP residual.
+        self.reliability_gate = nn.ModuleList(
+            [nn.Conv2d(2 * width + 3, 2, 1) for width in widths]
+        )
+
+    def forward(
+        self,
+        pre: torch.Tensor,
+        event: torch.Tensor,
+        change: torch.Tensor,
+        valid: torch.Tensor,
+        conditioning: torch.Tensor | None = None,
+        branch_validity: Mapping[str, torch.Tensor] | None = None,
+        reliability_features: Sequence[torch.Tensor] | None = None,
+    ) -> tuple[list[torch.Tensor], dict[str, Any]]:
+        branch_validity = branch_validity or {}
+        if reliability_features is None or len(reliability_features) != len(self.widths):
+            raise ValueError("joint S1 encoder requires one reliability feature per scale")
+        pre_valid = branch_validity.get("s1_t1", branch_validity.get("t1", valid))
+        event_valid = branch_validity.get("s1_t2", branch_validity.get("t2", valid))
+        change_valid = branch_validity.get(
+            "s1_change", branch_validity.get("change", valid)
+        )
+        pair_valid = torch.minimum(pre_valid, event_valid)
+        internal_change = (event - pre) * pair_valid
+        if self.conditioning_channels:
+            if conditioning is None:
+                raise KeyError("S1 angle conditioning was configured but absent")
+            conditioned = conditioning * event_valid
+        else:
+            conditioned = pre.new_zeros(pre.shape[0], 0, *pre.shape[-2:])
+        joint = torch.cat(
+            (
+                pre * pre_valid,
+                event * event_valid,
+                change * change_valid,
+                internal_change,
+                internal_change.abs(),
+                conditioned,
+                pre_valid,
+                event_valid,
+                change_valid,
+                pair_valid,
+            ),
+            dim=1,
+        )
+        features = self.pyramid(joint)
+
+        outputs: list[torch.Tensor] = []
+        quality_gates: list[torch.Tensor] = []
+        reliability_gates: list[torch.Tensor] = []
+        change_evidence: list[torch.Tensor] = []
+        pair_fractions: list[torch.Tensor] = []
+        pre_fractions: list[torch.Tensor] = []
+        for index, feature in enumerate(features):
+            size = feature.shape[-2:]
+            pre_fraction = _pool_fraction(pre_valid, size).to(feature.dtype)
+            event_fraction = _pool_fraction(event_valid, size).to(feature.dtype)
+            change_fraction = _pool_fraction(change_valid, size).to(feature.dtype)
+            pair_fraction = _pool_fraction(pair_valid, size).to(feature.dtype)
+            reliability = reliability_features[index]
+            if reliability.shape[-2:] != size:
+                raise ValueError(
+                    "reliability conditioner scale shape does not match joint features"
+                )
+            projected_change = self.change_projection[index](
+                F.interpolate(
+                    change * change_valid,
+                    size=size,
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            ) * change_fraction
+            quality_logit, reliability_logit = self.reliability_gate[index](
+                torch.cat(
+                    (
+                        feature,
+                        reliability,
+                        event_fraction,
+                        change_fraction,
+                        pair_fraction,
+                    ),
+                    dim=1,
+                )
+            ).chunk(2, dim=1)
+            quality = torch.sigmoid(quality_logit) * event_fraction
+            reliability_gate = torch.sigmoid(reliability_logit) * event_fraction
+            output = (
+                feature
+                + 0.15 * reliability_gate * reliability
+                + 0.10 * quality * projected_change
+            ) * event_fraction
+            outputs.append(output)
+            quality_gates.append(quality)
+            reliability_gates.append(reliability_gate)
+            change_evidence.append(projected_change)
+            pair_fractions.append(pair_fraction)
+            pre_fractions.append(pre_fraction)
+
+        zero = outputs[0].sum() * 0.0
+        diagnostics: dict[str, Any] = {
+            "change_gates": quality_gates,
+            "quality_gates": quality_gates,
+            "detail_gates": quality_gates,
+            "reliability_gates": reliability_gates,
+            "angle_film_amplitude": zero,
+            "change_evidence": change_evidence,
+            "internal_change_weights": [],
+            "external_change_weights": [],
+            "internal_change": [internal_change],
+            "pair_valid_fractions": pair_fractions,
+            "pre_context_gates": pre_fractions,
+            "internal_weight_mean": zero,
+            "external_weight_mean": zero,
+            "pair_valid_fraction_mean": torch.stack(
+                [value.mean() for value in pair_fractions]
+            ).mean(),
+            "pre_context_gate_mean": torch.stack(
+                [value.mean() for value in pre_fractions]
+            ).mean(),
+            "change_gate_mean": torch.stack(
+                [value.mean() for value in quality_gates]
+            ).mean(),
+            "quality_mean": torch.stack(
+                [value.mean() for value in quality_gates]
+            ).mean(),
+            "detail_gate_mean": torch.stack(
+                [value.mean() for value in quality_gates]
+            ).mean(),
+            "reliability_residual_mean": torch.stack(
+                [value.mean() for value in reliability_gates]
+            ).mean(),
+        }
+        return outputs, diagnostics
+
+
 class SARHydrologyEncoder(nn.Module):
     """Temporal-Change SAR Encoder (TCSE) with reliability-aware gating."""
 
@@ -395,7 +587,13 @@ class SARHydrologyEncoder(nn.Module):
 class HydrologyContext(nn.Module):
     """Multi-dilation context aggregator with a bounded residual update."""
 
-    def __init__(self, channels: int, groups: int = 8, dropout: float = 0.05) -> None:
+    def __init__(
+        self,
+        channels: int,
+        groups: int = 8,
+        dropout: float = 0.05,
+        global_context_enabled: bool = False,
+    ) -> None:
         super().__init__()
         self.paths = nn.ModuleList([
             nn.Sequential(
@@ -413,11 +611,29 @@ class HydrologyContext(nn.Module):
             nn.Dropout2d(dropout),
         )
         self.gamma = nn.Parameter(torch.tensor(0.15))
+        self.global_context = (
+            nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Conv2d(channels, max(16, channels // 4), 1),
+                nn.SiLU(inplace=True),
+                nn.Conv2d(max(16, channels // 4), channels, 1),
+            )
+            if global_context_enabled
+            else None
+        )
+        if self.global_context is not None:
+            final = self.global_context[-1]
+            assert isinstance(final, nn.Conv2d)
+            nn.init.zeros_(final.weight)
+            nn.init.zeros_(final.bias)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return inputs + self.gamma.clamp(0.0, 0.50) * self.project(
+        output = inputs + self.gamma.clamp(0.0, 0.50) * self.project(
             torch.cat([path(inputs) for path in self.paths], dim=1)
         )
+        if self.global_context is not None:
+            output = output + self.global_context(inputs)
+        return output
 
 
 class S1HydrologyFusion(nn.Module):

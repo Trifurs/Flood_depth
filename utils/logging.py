@@ -159,16 +159,25 @@ def log_epoch_summary(
 def append_csv(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing: list[dict[str, str]] = []
+    fieldnames = list(row)
     if path.exists():
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
-            if reader.fieldnames != list(row):
-                raise ValueError(
-                    f"CSV schema changed for {path}: {reader.fieldnames} != {list(row)}"
-                )
+            existing_fieldnames = reader.fieldnames
+            if existing_fieldnames is None:
+                raise ValueError(f"CSV has no header: {path}")
+            if len(existing_fieldnames) != len(set(existing_fieldnames)):
+                raise ValueError(f"CSV contains duplicate columns: {path}")
+            # Metric aggregation may reorder keys or expose optional
+            # diagnostics only in selected epochs (including after resume).
+            # Preserve the established order, append genuinely new columns,
+            # and let DictWriter leave unavailable values empty.
+            fieldnames = existing_fieldnames + [
+                key for key in row if key not in existing_fieldnames
+            ]
             existing = list(reader)
     buffer = io.StringIO(newline="")
-    writer = csv.DictWriter(buffer, fieldnames=list(row))
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
     writer.writeheader()
     writer.writerows(existing)
     writer.writerow(row)

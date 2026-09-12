@@ -191,6 +191,17 @@ class EvaluationAggregator:
             summary["event_macro_mae"]
             + summary["event_depth_hierarchical_macro_mae"]
         )
+        # All four terms are metre-valued errors.  Their equal-weight mean is a
+        # checkpoint-selection score aligned with pixel accuracy, large-error
+        # control, whole-event fairness, and train-depth-stratum robustness.
+        # R²/NSE need not be inserted separately because, for a fixed validation
+        # target, their ordering is already determined by squared error.
+        summary["balanced_composite_error_m"] = 0.25 * (
+            summary["pixel_micro_mae"]
+            + summary["pixel_micro_rmse"]
+            + summary["event_macro_mae"]
+            + summary["event_depth_hierarchical_macro_mae"]
+        )
         summary.update(prefixed(uncertainty_metrics(predictions, targets, scales), "uncertainty_"))
         for diagnostic in (
             "positive_region_wse_laplacian",

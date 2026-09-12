@@ -5,8 +5,8 @@ Usage:
     python train.py configs/pa_hydrokan.xml
 
 The XML selects the model, data contract, hyperparameters, timestamped run
-directory, and output policy. Traditional methods have no fitting stage, so
-their invocation runs the configured deterministic validation/test evaluation.
+directory, and output policy. Traditional methods have no fitting stage and are
+therefore evaluated only by the root-level ``test.py`` entry point.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 from tools._neural_regression import run_training as run_learned_training
-from tools._run_terrain_baseline import run_model as run_traditional_evaluation
 from tools.train_pa_hydrokan import run_training as run_pa_hydrokan_training
 from utils.config import load_config
 from utils.model_dispatch import configured_model_kind
@@ -27,8 +26,6 @@ from utils.run_paths import (
     RuntimeConfigError,
     allow_existing_output,
     ensure_output_is_available,
-    evaluation_output_path,
-    evaluation_split,
     optional_nonnegative_int,
     optional_path,
     runtime_section,
@@ -42,6 +39,11 @@ def _pa_training_args(config_path: Path, config: Mapping[str, Any], output: Path
     init_weights = str(train.get("init_weights", "raw"))
     if init_weights not in {"raw", "ema"}:
         raise RuntimeConfigError("runtime.train.init_weights must be 'raw' or 'ema'")
+    init_transfer = str(train.get("init_transfer", "strict"))
+    if init_transfer not in {"strict", "compatible"}:
+        raise RuntimeConfigError(
+            "runtime.train.init_transfer must be 'strict' or 'compatible'"
+        )
     return Namespace(
         config=config_path,
         device=None,
@@ -53,6 +55,7 @@ def _pa_training_args(config_path: Path, config: Mapping[str, Any], output: Path
             train.get("init_checkpoint"), "runtime.train.init_checkpoint"
         ),
         init_weights=init_weights,
+        init_transfer=init_transfer,
         max_train_batches=optional_nonnegative_int(
             train.get("max_train_batches"), "runtime.train.max_train_batches"
         ),
@@ -70,15 +73,13 @@ def _pa_training_args(config_path: Path, config: Mapping[str, Any], output: Path
 
 def _learned_training_args(config_path: Path, config: Mapping[str, Any], output: Path) -> Namespace:
     train = runtime_section(config, "train")
-    unsupported = [
-        name
-        for name in ("resume", "init_checkpoint")
-        if optional_path(train.get(name), f"runtime.train.{name}") is not None
-    ]
-    if unsupported:
+    init_checkpoint = optional_path(
+        train.get("init_checkpoint"), "runtime.train.init_checkpoint"
+    )
+    if init_checkpoint is not None:
         raise RuntimeConfigError(
-            "learned comparison training does not implement checkpoint continuation; "
-            f"remove {unsupported} from the configuration"
+            "learned comparison training does not implement init_checkpoint; "
+            "use runtime.train.resume with a last_raw.pth checkpoint instead"
         )
     return Namespace(
         config=config_path,
@@ -94,11 +95,15 @@ def _learned_training_args(config_path: Path, config: Mapping[str, Any], output:
         ),
         no_amp=False,
         seed=None,
+        resume=optional_path(train.get("resume"), "runtime.train.resume"),
+        allow_fingerprint_mismatch=bool(
+            train.get("allow_fingerprint_mismatch", False)
+        ),
         output=output,
     )
 
 
-def run_from_config(config_path: Path) -> Path | dict[str, Any]:
+def run_from_config(config_path: Path) -> Path:
     """Dispatch one XML configuration without accepting model-specific CLI options."""
 
     path = config_path.expanduser().resolve(strict=True)
@@ -106,22 +111,10 @@ def run_from_config(config_path: Path) -> Path | dict[str, Any]:
     kind, identifier = configured_model_kind(config)
     run_id = started_at_run_id(config)
     if kind == "traditional":
-        output = evaluation_output_path(config, run_id)
-        ensure_output_is_available(
-            output,
-            allow_existing=allow_existing_output(config, "evaluation"),
-            operation="traditional evaluation",
-        )
-        return run_traditional_evaluation(
-            config,
-            evaluation_split(config),
-            identifier,
-            output,
-            optional_nonnegative_int(
-                runtime_section(config, "evaluation").get("max_batches"),
-                "runtime.evaluation.max_batches",
-            ),
-            bool(runtime_section(config, "evaluation").get("save_predictions", False)),
+        raise RuntimeConfigError(
+            "Traditional models have no training stage. Test them with "
+            "`python test.py <training-runs-directory> --traditional` "
+            "(traditional evaluation is enabled by default)."
         )
 
     train = runtime_section(config, "train")
@@ -155,12 +148,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     result = run_from_config(args.config)
-    if isinstance(result, Path):
-        logging.getLogger("training").info("Training complete | output=%s", result)
-    else:
-        logging.getLogger("comparison.traditional").info(
-            "Deterministic evaluation results saved."
-        )
+    logging.getLogger("training").info("Training complete | output=%s", result)
     return 0
 
 

@@ -47,12 +47,47 @@ class EfficientResidualBlock(nn.Module):
         return self.activation(inputs + self.norm(update))
 
 
-def residual_block(kind: str, channels: int, dropout: float, groups: int) -> nn.Module:
-    """Construct the single residual-block implementation used in production."""
+class SpatialResidualBlock(nn.Module):
+    """Full-convolution residual block for detail-sensitive depth regression.
 
-    if kind != "efficient":
-        raise ValueError(f"Unsupported residual block {kind!r}; expected 'efficient'")
-    return EfficientResidualBlock(channels, dropout, groups)
+    The efficient block above is deliberately inexpensive, but its only spatial
+    operator is depthwise and therefore cannot learn cross-channel spatial
+    patterns in one step.  Flood-depth regression depends on joint SAR and
+    terrain neighbourhoods, so this optional block uses two ordinary 3x3
+    convolutions while retaining the batch-size-stable GroupNorm contract.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        dropout: float = 0.0,
+        groups: int = 8,
+    ) -> None:
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1, bias=False),
+            nn.GroupNorm(group_count(channels, groups), channels),
+            nn.SiLU(inplace=True),
+            nn.Dropout2d(dropout),
+            nn.Conv2d(channels, channels, 3, padding=1, bias=False),
+            nn.GroupNorm(group_count(channels, groups), channels),
+        )
+        self.activation = nn.SiLU(inplace=True)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.activation(inputs + self.block(inputs))
+
+
+def residual_block(kind: str, channels: int, dropout: float, groups: int) -> nn.Module:
+    """Construct a configured residual block."""
+
+    if kind == "efficient":
+        return EfficientResidualBlock(channels, dropout, groups)
+    if kind == "spatial":
+        return SpatialResidualBlock(channels, dropout, groups)
+    raise ValueError(
+        f"Unsupported residual block {kind!r}; expected 'efficient' or 'spatial'"
+    )
 
 
 class EfficientPyramidBranch(nn.Module):

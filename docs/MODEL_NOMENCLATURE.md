@@ -20,16 +20,16 @@ Recommended first-use wording:
 
 ## Paper module labels
 
-| Label | Paper-facing name | Implementation anchor | Independent ablation |
+| Label | Paper-facing name | Implementation anchor | Ablation role |
 |---|---|---|---|
 | RCP | Reliability-Conditioning Pyramid | `SARReliabilityConditioner` | `w/o RCP` |
-| TCSE | Temporal-Change SAR Encoder | `SARHydrologyEncoder` | retained backbone |
+| TCSE | Temporal-Change SAR Encoder | `JointSARHydrologyEncoder` | retained backbone |
 | TPP | Topographic-Prior Pyramid | `TerrainFeaturePyramid` | retained to preserve decoder/graph geometry |
 | TCF | Terrain-Conditioned Fusion | `S1HydrologyFusion` | `w/o TCF` |
 | TAE-KAN | Topographic-Affinity Edge-KAN | `HydroEdgeKAN` | `w/o TAE-KAN` |
-| LCA | Latent Compatibility Adapter | `HydroEdgeKAN.latent_compatibility` | `w/o LCA` |
+| LCA | Latent Compatibility Adapter | `HydroEdgeKAN.latent_compatibility` | internal to TAE-KAN; not a separate factor |
 | DGD | Dual-Gated Decoder | `SARHydroDecoder` | retained decoder |
-| CDH | Conditional-Depth Head | `PAHydroKANHeads` | retained prediction head |
+| CDH | Conditional-Depth Head | `PAHydroKANHeads` | retained prediction head; includes local and patch-level calibration |
 
 The paper labels are intentionally concise while Python class names remain
 descriptive implementation symbols. This avoids an unnecessary checkpoint-API
@@ -42,5 +42,9 @@ break while keeping figures, tables, and ablation labels consistent.
 - Introduce each acronym once; subsequently use its short label consistently.
 - Name ablations as `PA-HydroKAN w/o <module>` rather than inventing a new model
   name for a disabled component.
+- Treat RCP, TCF, and TAE-KAN as the three peer ablation factors. LCA is a
+  subordinate TAE-KAN mechanism and is disabled together with its parent path.
+- Treat contextual depth-range calibration and global evidence calibration as
+  internal CDH mechanisms, not additional peer modules or ablation factors.
 - Reserve “physics-informed” and “hydraulic” for experiments that actually use
   and validate those mechanisms.

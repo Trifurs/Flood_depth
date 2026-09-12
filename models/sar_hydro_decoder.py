@@ -26,6 +26,7 @@ class SARHydroDecoder(nn.Module):
         auxiliary_count: int = 1,
         auxiliary_stage: int = 0,
         change_injection_scale: float = 0.05,
+        skip_fusion: str = "additive",
     ) -> None:
         super().__init__()
         widths = [int(value) for value in widths]
@@ -42,6 +43,9 @@ class SARHydroDecoder(nn.Module):
         self.widths = widths
         self.auxiliary_stage = int(auxiliary_stage)
         self.change_injection_scale = float(change_injection_scale)
+        self.skip_fusion = str(skip_fusion)
+        if self.skip_fusion not in {"additive", "concatenative"}:
+            raise ValueError("decoder skip_fusion must be additive or concatenative")
         if self.change_injection_scale < 0.0:
             raise ValueError("change_injection_scale must be nonnegative")
         self.bottleneck = ConvNormAct(int(channels[-1]), widths[0], 1, groups=groups)
@@ -60,6 +64,24 @@ class SARHydroDecoder(nn.Module):
         self.gates = nn.ModuleList(
             [nn.Conv2d(3 * target + 2, 2, 1) for target in target_widths]
         )
+        self.skip_merge = (
+            nn.ModuleList(
+                [nn.Conv2d(3 * target, target, 1, bias=False) for target in target_widths]
+            )
+            if self.skip_fusion == "concatenative"
+            else None
+        )
+        if self.skip_merge is not None:
+            # Exact additive initialization makes an architecture-transfer run
+            # start from the established decoder before learning cross-channel
+            # interactions among the three streams.
+            with torch.no_grad():
+                for layer, target in zip(self.skip_merge, target_widths):
+                    layer.weight.zero_()
+                    indices = torch.arange(target)
+                    layer.weight[indices, indices, 0, 0] = 1.0
+                    layer.weight[indices, target + indices, 0, 0] = 1.0
+                    layer.weight[indices, 2 * target + indices, 0, 0] = 1.0
         self.refine = nn.ModuleList(
             [residual_block(block_kind, target, dropout, groups) for target in target_widths]
         )
@@ -105,9 +127,15 @@ class SARHydroDecoder(nn.Module):
             )
             sar_gate = torch.sigmoid(logits[:, 0:1]) * sensor_fraction
             terrain_gate = torch.sigmoid(logits[:, 1:2]) * dem_fraction
-            decoded = self.refine[stage](
-                decoded + sar_gate * sar_skip + terrain_gate * terrain_skip
-            )
+            gated_sar = sar_gate * sar_skip
+            gated_terrain = terrain_gate * terrain_skip
+            if self.skip_merge is None:
+                merged = decoded + gated_sar + gated_terrain
+            else:
+                merged = self.skip_merge[stage](
+                    torch.cat((decoded, gated_sar, gated_terrain), dim=1)
+                )
+            decoded = self.refine[stage](merged)
             gate_maps.append({
                 "sar": sar_gate,
                 "terrain": terrain_gate,

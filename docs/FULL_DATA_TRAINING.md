@@ -27,10 +27,12 @@ batch size、workers、AMP、优化器、scheduler、早停与评估设置均不
   checkpoint 时会选择该模型最近一个包含 `best_raw.pth` 的完整训练；需要严格复现实验时，
   将 `source_run` 设为对应的时间戳目录名。
 
-默认正式基线为 AdamW（`2e-4`，weight decay `1e-4`）、10 epoch warm-up cosine
+默认正式基线为 AdamW（`2e-4`，weight decay `5e-5`）、5 epoch warm-up cosine
 schedule、200 epochs 上限、60 epochs 下限、patience 30、batch size 12、8 workers、
-bfloat16 AMP 与梯度裁剪 1.0；PA-HydroKAN 额外使用 EMA（`0.9995`）。需要调整任何
-参数时，修改 XML，而不是向命令追加覆盖项。
+bfloat16 AMP 与梯度裁剪 1.0。所有深度学习模型统一用
+`balanced_composite_error_m` 选择单一 raw checkpoint，不再为 PA-HydroKAN 单独启用
+EMA。事件平衡采样使用 replacement 和 `event_balance_power=0.25`；这些共同条件均位于
+base/dataset 配置中。需要调整任何参数时，修改 XML，而不是向命令追加覆盖项。
 
 ### 当前工作站的实测硬件配置
 
@@ -63,13 +65,17 @@ python train.py configs/compare/deep_learning/resnet18_depth_regression.xml
 python train.py configs/compare/deep_learning/unetplusplus_depth_regression.xml
 ```
 
-传统方法没有可训练参数；对其运行同一入口会执行 XML 中配置的确定性评估：
+传统方法没有训练阶段，因此 `train.py` 会拒绝传统模型配置。完成深度学习模型训练后，使用
+一个目录参数自动发现每个模型最新的完整 checkpoint，并在官方测试集上测试；传统模型默认
+同时计算：
 
 ```bash
-python train.py configs/compare/traditional/fwdet_v2.xml
-python train.py configs/compare/traditional/tsa.xml
-python train.py configs/compare/traditional/fldepth.xml
+python test.py runs/flooddepthnet_s1_terrain/train
 ```
+
+需要排除传统模型时使用 `--no-traditional`；需要评估目录下所有重复运行而非每个模型最新一次
+运行时使用 `--all-runs`。汇总报告包含深度精度、参数量、checkpoint 体积、同步纯前向延迟、
+吞吐率、峰值 GPU 显存及端到端测试时间。
 
 所有模型的统一评估命令同样为：
 
@@ -79,8 +85,32 @@ python evaluate.py <model-config.xml>
 
 默认 `runtime.evaluation.split` 为 `val`，并自动使用最近一次完整训练目录中的
 `best_raw.pth`。完成验证集选择后，将 XML 的该字段改为 `test`，再运行同一条
-`python evaluate.py ...` 命令。传统方法没有 checkpoint；`train.py` 与
-`evaluate.py` 对它们都会触发同一确定性评估。
+`python evaluate.py ...` 命令。正式的全模型测试与传统模型计算统一由 `test.py` 完成。
+
+完整 event 分组 5 折交叉验证使用：
+
+```bash
+python validate_k_fold.py
+```
+
+也可把其他 `k` 作为唯一位置参数，例如 `python validate_k_fold.py 10`。脚本把原
+train+val+test 的全部样本合并，再按 `source_event_id` 重新分为外层折。每轮一折只作
+外层测试，其余四折再按 event 划分训练集与内层早停验证集。任何 event 在同一轮都不会
+跨训练/内层验证/外层测试角色，每个样本在五轮中恰好一次进入外层测试。每折独立重算
+train-only 归一化和深度校准，并自动训练主模型、全部深度学习对比模型及七个消融组合。最终
+直接打印每个外层测试折的指标和跨折均值 ± 样本标准差，同时保存完整 CSV/JSON。
+由于原 test 样本也按要求纳入了这个全样本流程，交叉验证之外不再另有一份独立外部测试集；
+正式泛化结论应以五个互斥外层测试折的统计为准。
+每个 model×fold 在独立子进程中执行并逐项落盘。中断后使用
+`python validate_k_fold.py --resume` 自动续跑最新未完成会话；已完成项目不重复，
+未完成训练从 last checkpoint 继续。正式交叉验证会检查 CUDA 健康状态，
+驱动不可用时拒绝静默回退到 CPU。隔离 worker 的
+`MKL_THREADING_LAYER=GNU` 也由 base XML 统一配置，正式执行前会在同样的
+子进程环境中预检 NumPy、PyTorch 和 CUDA。
+新会话同时固化全部模型的合并后配置、源 manifest、全样本嵌套划分协议和运行时代码 SHA-256，
+并在每个任务前复核。当前全样本外层测试协议之前创建的旧会话不允许续跑，以免将不同划分或模型的
+fold 结果混入同一统计；
+当前正式实验必须先使用不带 `--resume` 的命令创建新会话。
 
 ## 结果目录
 
@@ -91,6 +121,8 @@ runs/flooddepthnet_s1_terrain/
 ├── train/<model-run-name>/<started-at>/
 ├── ablation/<variant>/<started-at>/
 ├── evaluate/<model-run-name>/<val-or-test>/<source-training-run>/
+├── test/<started-at>/
+├── cross_validation/k<k>/<started-at>/
 ├── comparison/<split>/<comparison-id>/
 ├── inventory/
 └── infer/<model>/<sample-timestamp>/
@@ -99,7 +131,7 @@ runs/flooddepthnet_s1_terrain/
 消融训练也不需要模型专属命令：
 
 ```bash
-python train.py configs/ablation/pa_hydrokan_no_topographic_affinity_edge_kan.xml
+python train.py configs/ablation/pa_hydrokan_wo_tae_kan.xml
 ```
 
 每个训练目录保存解析后的配置、数据指纹、校准状态、checkpoint、参数清单和指标。比较模型

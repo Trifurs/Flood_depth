@@ -14,20 +14,40 @@ from torch.utils.data import BatchSampler, Sampler, WeightedRandomSampler
 LOGGER = logging.getLogger(__name__)
 
 
-def event_weights(event_ids: Sequence[str]) -> torch.Tensor:
+def event_weights(
+    event_ids: Sequence[str], balance_power: float = 1.0
+) -> torch.Tensor:
+    """Return per-sample weights proportional to ``event_count ** -power``.
+
+    ``power=0`` is ordinary uniform sampling, while ``power=1`` gives every
+    source event the same expected mass.  Fractional powers provide a stable
+    compromise for highly imbalanced event catalogues without repeatedly
+    presenting singleton events as often as large multi-patch events.
+    """
+
+    if not math.isfinite(balance_power) or not 0.0 <= balance_power <= 1.0:
+        raise ValueError("event balance power must lie in [0, 1]")
     if not event_ids or any(not event for event in event_ids):
         LOGGER.warning("source_event_id is missing; falling back to uniform sampling")
         return torch.ones(len(event_ids), dtype=torch.double)
     counts = Counter(event_ids)
-    return torch.tensor([1.0 / counts[event] for event in event_ids], dtype=torch.double)
+    return torch.tensor(
+        [float(counts[event]) ** -float(balance_power) for event in event_ids],
+        dtype=torch.double,
+    )
 
 
-def make_event_balanced_sampler(event_ids: Sequence[str], seed: int) -> WeightedRandomSampler:
-    """Return an inverse-frequency event-balanced sampler with replacement."""
+def make_event_balanced_sampler(
+    event_ids: Sequence[str], seed: int, balance_power: float = 1.0
+) -> WeightedRandomSampler:
+    """Return a tempered event-balanced sampler with replacement."""
 
     generator = torch.Generator().manual_seed(seed)
     return WeightedRandomSampler(
-        event_weights(event_ids), len(event_ids), replacement=True, generator=generator
+        event_weights(event_ids, balance_power),
+        len(event_ids),
+        replacement=True,
+        generator=generator,
     )
 
 
@@ -83,9 +103,14 @@ class DistributedEventBalancedSampler(Sampler[int]):
     """Draw one global weighted epoch deterministically and shard it across ranks."""
 
     def __init__(
-        self, event_ids: Sequence[str], num_replicas: int, rank: int, seed: int
+        self,
+        event_ids: Sequence[str],
+        num_replicas: int,
+        rank: int,
+        seed: int,
+        balance_power: float = 1.0,
     ) -> None:
-        self.weights = event_weights(event_ids)
+        self.weights = event_weights(event_ids, balance_power)
         self.dataset_size = len(event_ids)
         self.num_replicas = num_replicas
         self.rank = rank

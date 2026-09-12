@@ -42,10 +42,10 @@ def test_common_runtime_resolves_model_and_ablation_paths() -> None:
     )
 
     ablation = load_config(
-        "configs/ablation/pa_hydrokan_no_topographic_affinity_edge_kan.xml"
+        "configs/ablation/pa_hydrokan_wo_rcp_tcf_tae_kan.xml"
     )
     assert train_output_path(ablation, run_id).as_posix().endswith(
-        "ablation/no_tae_kan/20260908-153045-123456"
+        "ablation/wo_rcp_tcf_tae_kan/20260908-153045-123456"
     )
 
 
@@ -131,32 +131,11 @@ def test_unified_train_dispatches_pa_without_cli_overrides(monkeypatch, tmp_path
     assert captured["args"].output == tmp_path / "train_output"
 
 
-def test_unified_train_dispatches_traditional_evaluation(monkeypatch, tmp_path: Path) -> None:
+def test_unified_train_rejects_traditional_models(monkeypatch, tmp_path: Path) -> None:
     config = _configured("configs/compare/traditional/fwdet_v2.xml", tmp_path)
     monkeypatch.setattr(train, "load_config", lambda _: config)
-    captured = {}
-
-    def fake_run(config_value, split, method, output, max_batches, save_predictions):
-        captured.update(
-            split=split,
-            method=method,
-            output=output,
-            max_batches=max_batches,
-            save_predictions=save_predictions,
-        )
-        return {"method": method}
-
-    monkeypatch.setattr(train, "run_traditional_evaluation", fake_run)
-    assert train.run_from_config(Path("configs/compare/traditional/fwdet_v2.xml")) == {
-        "method": "fwdet_v2"
-    }
-    assert captured == {
-        "split": "val",
-        "method": "fwdet_v2",
-        "output": tmp_path / "evaluation_output",
-        "max_batches": None,
-        "save_predictions": False,
-    }
+    with pytest.raises(ValueError, match="test.py"):
+        train.run_from_config(Path("configs/compare/traditional/fwdet_v2.xml"))
 
 
 def test_unified_train_dispatches_learned_comparator_without_cli_overrides(
@@ -184,6 +163,31 @@ def test_unified_train_dispatches_learned_comparator_without_cli_overrides(
     assert captured["args"].batch_size is None
     assert captured["args"].num_workers is None
     assert captured["args"].output == tmp_path / "train_output"
+
+
+def test_unified_train_passes_learned_comparator_resume_checkpoint(
+    monkeypatch, tmp_path: Path
+) -> None:
+    checkpoint = tmp_path / "train_output" / "last_raw.pth"
+    checkpoint.parent.mkdir()
+    checkpoint.touch()
+    config = _configured("configs/compare/deep_learning/dlsim_linknet.xml", tmp_path)
+    config["runtime"]["train"]["resume"] = checkpoint
+    monkeypatch.setattr(train, "load_config", lambda _: config)
+    captured = {}
+
+    def fake_run(args, identifier):
+        captured["args"] = args
+        captured["identifier"] = identifier
+        return args.output
+
+    monkeypatch.setattr(train, "run_learned_training", fake_run)
+    result = train.run_from_config(
+        Path("configs/compare/deep_learning/dlsim_linknet.xml")
+    )
+    assert result == checkpoint.parent
+    assert captured["identifier"] == "dlsim_linknet"
+    assert captured["args"].resume == checkpoint
 
 
 def test_unified_evaluate_resolves_configured_checkpoint(monkeypatch, tmp_path: Path) -> None:

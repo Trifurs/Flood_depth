@@ -4,6 +4,7 @@
   <run_name type="str">dlsim_attention_unet</run_name>
   <model>
     <name type="str">dlsim_attention_unet</name>
+    <display_name type="str">DLSIM Attention U-Net</display_name>
     <input_schema type="str">dlsim_change_dsm_range</input_schema>
     <input_channels type="int">5</input_channels>
     <flood_support type="str">valid_depth_mask</flood_support>

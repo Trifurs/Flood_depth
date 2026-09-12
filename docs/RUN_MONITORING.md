@@ -52,8 +52,8 @@ conda run -n flood-depth tensorboard \
 Useful scalar groups are:
 
 - `train/*`: objective and train-time components.
-- `validation/raw/*` and, for PA-HydroKAN, `validation/ema/*`: validation
-  metrics.
+- `validation/raw/*`: validation metrics. `validation/ema/*` appears only when
+  an experiment explicitly enables EMA; it is disabled in the matched default.
 - `system/*`: learning rate, best metric, epoch duration, elapsed time, ETA,
   and early-stopping count/remaining patience.
 - `evaluation/*`: metrics from standalone evaluation and deterministic

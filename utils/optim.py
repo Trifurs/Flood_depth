@@ -22,13 +22,33 @@ def build_optimizer(model: torch.nn.Module, config: dict) -> torch.optim.Optimiz
     kan_lr = float(optimizer_config.get("kan_lr_multiplier", 1.0))
     kan_decay = float(optimizer_config.get("kan_weight_decay", base_decay))
     head_lr = float(optimizer_config.get("head_lr_multiplier", 1.0))
+    adapter_lr = float(optimizer_config.get("adapter_lr_multiplier", 1.0))
     groups: dict[tuple[float, float], list[torch.nn.Parameter]] = {}
     for parameter_name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
         normalized = parameter_name.lower()
         no_decay = parameter.ndim == 1 or normalized.endswith("bias") or "norm" in normalized or "gamma" in normalized
-        lr_multiplier = kan_lr if "spline_coefficients" in normalized else head_lr if "heads" in normalized else 1.0
+        is_adapter = any(
+            marker in normalized
+            for marker in (
+                "context_adapter",
+                "skip_merge",
+                "global_context",
+                "hydrostatic_adapter",
+                "global_depth_calibration_adapter",
+                "depth_range_calibration",
+            )
+        )
+        lr_multiplier = (
+            kan_lr
+            if "spline_coefficients" in normalized
+            else adapter_lr
+            if is_adapter
+            else head_lr
+            if "heads" in normalized
+            else 1.0
+        )
         decay = 0.0 if no_decay else kan_decay if "spline_coefficients" in normalized else base_decay
         groups.setdefault((lr_multiplier, decay), []).append(parameter)
     return torch.optim.AdamW([
